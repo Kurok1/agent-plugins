@@ -1,0 +1,6 @@
+# @author Kurok1 <im.kurokyhanc@gmail.com>
+# @since 0.1.0
+interface:
+  display_name: "Codebase Map"
+  short_description: "Maintain an incremental Markdown codebase map"
+  default_prompt: "Use $codebase-map to update the Markdown codebase map from verified knowledge discovered in this session."

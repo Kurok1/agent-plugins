@@ -1,0 +1,58 @@
+{
+  "description": "Incrementally maintain and load project codebase maps.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/codebase-map/scripts/codebase_map.py\" hook session-start",
+            "commandWindows": "py -3 \"%PLUGIN_ROOT%\\skills\\codebase-map\\scripts\\codebase_map.py\" hook session-start",
+            "timeout": 3,
+            "statusMessage": "Loading codebase map",
+            "additionalContextLimit": 3500
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/codebase-map/scripts/codebase_map.py\" hook post-tool-use",
+            "commandWindows": "py -3 \"%PLUGIN_ROOT%\\skills\\codebase-map\\scripts\\codebase_map.py\" hook post-tool-use",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/codebase-map/scripts/codebase_map.py\" hook stop",
+            "commandWindows": "py -3 \"%PLUGIN_ROOT%\\skills\\codebase-map\\scripts\\codebase_map.py\" hook stop",
+            "timeout": 3,
+            "statusMessage": "Checking codebase map update"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/skills/codebase-map/scripts/codebase_map.py\" hook session-end",
+            "commandWindows": "py -3 \"%PLUGIN_ROOT%\\skills\\codebase-map\\scripts\\codebase_map.py\" hook session-end",
+            "timeout": 3,
+            "statusMessage": "Preserving codebase map evidence"
+          }
+        ]
+      }
+    ]
+  }
+}

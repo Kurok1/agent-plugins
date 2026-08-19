@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-@author: hanchao <hanchao@66yunlian.com>
+@author: Kurok1 <im.kurokyhanc@gmail.com>
 @since: 0.1.0
 """
 

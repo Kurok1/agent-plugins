@@ -3,15 +3,15 @@
   "version": "0.1.0",
   "description": "Incremental Markdown codebase maps for Codex sessions",
   "author": {
-    "name": "hanchao",
-    "email": "hanchao@66yunlian.com"
+    "name": "Kurok1",
+    "email": "im.kurokyhanc@gmail.com"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Plugins",
     "shortDescription": "Reuse Markdown codebase maps across Codex sessions.",
     "longDescription": "Agent Plugins captures project paths explored during a session, asks an Agent to incrementally maintain a linked Markdown codebase map, and loads its concise index in later sessions.",
-    "developerName": "hanchao",
+    "developerName": "Kurok1",
     "category": "Productivity",
     "capabilities": [
       "Incremental Markdown codebase mapping",

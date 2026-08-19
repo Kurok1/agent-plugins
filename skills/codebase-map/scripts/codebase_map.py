@@ -179,6 +179,47 @@ def is_excluded(relative_path: Path) -> bool:
     return bool(set(relative_path.parts) & EXCLUDED_PARTS)
 
 
+def resolve_evidence_project_root(project_root: Path, relative_path: str) -> Path:
+    """Return the deepest Git worktree that owns an evidence path."""
+    project_root = project_root.resolve()
+    absolute_path = (project_root / relative_path).resolve(strict=False)
+    if not is_within(absolute_path, project_root):
+        return project_root
+
+    for candidate in (absolute_path, *absolute_path.parents):
+        if candidate == project_root:
+            return project_root
+        if not is_within(candidate, project_root):
+            break
+        if (candidate / ".git").exists():
+            return candidate.resolve()
+    return project_root
+
+
+def partition_path_operations(
+    project_root: Path,
+    path_operations: dict[str, str],
+) -> dict[Path, dict[str, str]]:
+    """Partition workspace-relative evidence into owning Git worktrees."""
+    partitioned: dict[Path, dict[str, str]] = {}
+    for path, operation in path_operations.items():
+        absolute_path = (project_root / path).resolve(strict=False)
+        owner_root = resolve_evidence_project_root(project_root, path)
+        try:
+            owner_relative = absolute_path.relative_to(owner_root)
+        except ValueError:
+            owner_root = project_root
+            owner_relative = absolute_path.relative_to(project_root)
+        if is_excluded(owner_relative):
+            continue
+        add_path_operation(
+            partitioned.setdefault(owner_root, {}),
+            owner_relative.as_posix(),
+            operation,
+        )
+    return partitioned
+
+
 def clean_candidate(raw_value: str) -> str:
     value = raw_value.strip().strip("`'\"<>{}[](),;")
     if value.startswith("file://"):
@@ -357,31 +398,43 @@ def extract_path_operations(payload: dict[str, Any], project_root: Path) -> dict
 def record_post_tool_use(payload: dict[str, Any]) -> dict[str, Any]:
     project_root = resolve_project_root(payload.get("cwd") or Path.cwd())
     path_operations = extract_path_operations(payload, project_root)
-    if not path_operations:
+    partitioned = partition_path_operations(project_root, path_operations)
+    if not partitioned:
         return {"recorded": 0}
 
     session_id = str(payload.get("session_id") or "unknown")
     tool_use_id = str(payload.get("tool_use_id") or uuid.uuid4())
-    event = {
-        "schema_version": RUNTIME_SCHEMA_VERSION,
-        "session_id": session_id,
-        "tool_use_id": tool_use_id,
-        "turn_id": payload.get("turn_id"),
-        "recorded_at": utc_now(),
-        "project_root": str(project_root),
-        "tool_name": str(payload.get("tool_name") or "unknown"),
-        "paths": [
-            {"path": path, "operation": operation}
-            for path, operation in sorted(path_operations.items())
-        ],
-    }
-    event_path = (
-        runtime_session_dir(project_root, session_id)
-        / "events"
-        / f"{safe_component(tool_use_id)}.json"
-    )
-    atomic_write_json(event_path, event)
-    return {"recorded": len(path_operations), "event": str(event_path)}
+    event_paths: list[str] = []
+    recorded = 0
+    for owner_root, owner_operations in sorted(
+        partitioned.items(), key=lambda item: str(item[0])
+    ):
+        event = {
+            "schema_version": RUNTIME_SCHEMA_VERSION,
+            "session_id": session_id,
+            "tool_use_id": tool_use_id,
+            "turn_id": payload.get("turn_id"),
+            "recorded_at": utc_now(),
+            "project_root": str(owner_root),
+            "tool_name": str(payload.get("tool_name") or "unknown"),
+            "paths": [
+                {"path": path, "operation": operation}
+                for path, operation in sorted(owner_operations.items())
+            ],
+        }
+        event_path = (
+            runtime_session_dir(owner_root, session_id)
+            / "events"
+            / f"{safe_component(tool_use_id)}.json"
+        )
+        atomic_write_json(event_path, event)
+        event_paths.append(str(event_path))
+        recorded += len(owner_operations)
+
+    result: dict[str, Any] = {"recorded": recorded, "events": event_paths}
+    if len(event_paths) == 1:
+        result["event"] = event_paths[0]
+    return result
 
 
 def load_event_files(session_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
@@ -416,37 +469,73 @@ def aggregate_events(events: Iterable[tuple[Path, dict[str, Any]]]) -> list[dict
     return [{"path": path, "operation": operation} for path, operation in ordered]
 
 
-def ensure_pending(payload: dict[str, Any]) -> Path | None:
-    project_root = resolve_project_root(payload.get("cwd") or Path.cwd())
-    session_id = str(payload.get("session_id") or "unknown")
-    session_dir = runtime_session_dir(project_root, session_id)
-    events = load_event_files(session_dir)
-    paths = aggregate_events(events)
-    if not paths:
-        return None
+def session_events_by_project(
+    session_id: str,
+) -> dict[Path, list[tuple[Path, dict[str, Any]]]]:
+    grouped: dict[Path, list[tuple[Path, dict[str, Any]]]] = {}
+    target_session = safe_component(session_id)
+    target_runtime_root = runtime_root()
+    if not target_runtime_root.is_dir():
+        return grouped
 
-    pending_path = session_dir / "pending.json"
-    pending = {
-        "schema_version": RUNTIME_SCHEMA_VERSION,
-        "purpose": "Ephemeral evidence for a Markdown codebase-map update decision",
-        "created_at": utc_now(),
-        "session_id": session_id,
-        "turn_id": payload.get("turn_id"),
-        "model": payload.get("model"),
-        "project_root": str(project_root),
-        "map_root": str(map_root(project_root)),
-        "skill_dir": str(Path(__file__).resolve().parent.parent),
-        "event_count": len(events),
-        "paths": paths,
-        "constraints": [
-            "Decide UPDATE or NO_UPDATE from durable navigation value.",
-            "Inspect only these paths and narrowly required adjacent source.",
-            "Keep durable knowledge as Markdown under docs/.codebase-map.",
-            "Validate Markdown before acknowledging this evidence.",
-        ],
-    }
-    atomic_write_json(pending_path, pending)
-    return pending_path
+    try:
+        project_directories = sorted(
+            path for path in target_runtime_root.iterdir() if path.is_dir()
+        )
+    except OSError:
+        return grouped
+
+    for project_directory in project_directories:
+        session_dir = project_directory / target_session
+        for event_path, event in load_event_files(session_dir):
+            if event.get("session_id") != session_id:
+                continue
+            raw_project_root = event.get("project_root")
+            if not isinstance(raw_project_root, str):
+                continue
+            project_root = Path(raw_project_root).expanduser().resolve()
+            if runtime_project_dir(project_root) != project_directory.resolve():
+                continue
+            grouped.setdefault(project_root, []).append((event_path, event))
+    return grouped
+
+
+def ensure_pending(payload: dict[str, Any]) -> list[Path]:
+    session_id = str(payload.get("session_id") or "unknown")
+    pending_paths: list[Path] = []
+    for project_root, events in sorted(
+        session_events_by_project(session_id).items(), key=lambda item: str(item[0])
+    ):
+        paths = aggregate_events(events)
+        if not paths:
+            continue
+
+        session_dir = runtime_session_dir(project_root, session_id)
+        pending_path = session_dir / "pending.json"
+        pending = {
+            "schema_version": RUNTIME_SCHEMA_VERSION,
+            "purpose": "Ephemeral evidence for a Markdown codebase-map update decision",
+            "created_at": utc_now(),
+            "session_id": session_id,
+            "turn_id": payload.get("turn_id"),
+            "model": payload.get("model"),
+            "project_root": str(project_root),
+            "map_root": str(map_root(project_root)),
+            "skill_dir": str(Path(__file__).resolve().parent.parent),
+            "event_count": len(events),
+            "paths": paths,
+            "constraints": [
+                "Decide UPDATE or NO_UPDATE from durable navigation value.",
+                "Treat this pending file as evidence for project_root only.",
+                "Do not merge it into a parent workspace or sibling submodule map.",
+                "Inspect only these paths and narrowly required adjacent source.",
+                "Keep durable knowledge as Markdown under docs/.codebase-map.",
+                "Validate Markdown before acknowledging this evidence.",
+            ],
+        }
+        atomic_write_json(pending_path, pending)
+        pending_paths.append(pending_path)
+    return pending_paths
 
 
 def unacknowledged_pending(project_root: Path) -> list[Path]:
@@ -610,9 +699,79 @@ def validate_map(project_root: Path) -> dict[str, Any]:
     }
 
 
+def configured_submodule_roots(project_root: Path) -> list[Path]:
+    """Return initialized submodule roots, including initialized nested submodules."""
+    workspace_root = project_root.resolve()
+    discovered: list[Path] = []
+    queued: deque[Path] = deque([workspace_root])
+    visited: set[Path] = {workspace_root}
+
+    while queued:
+        parent_root = queued.popleft()
+        gitmodules = parent_root / ".gitmodules"
+        if not gitmodules.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(parent_root),
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    "--get-regexp",
+                    r"^submodule\..*\.path$",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            continue
+        if result.returncode not in (0, 1):
+            continue
+
+        for line in result.stdout.splitlines():
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2 or "\x00" in parts[1] or "\n" in parts[1]:
+                continue
+            raw_path = parts[1].strip()
+            if len(raw_path) >= 2 and raw_path[0] == raw_path[-1] == '"':
+                try:
+                    decoded_path = json.loads(raw_path)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(decoded_path, str):
+                    continue
+                raw_path = decoded_path
+            candidate = (parent_root / raw_path).resolve(strict=False)
+            if candidate in visited or not is_within(candidate, workspace_root):
+                continue
+            if not candidate.is_dir() or not (candidate / ".git").exists():
+                continue
+            visited.add(candidate)
+            discovered.append(candidate)
+            queued.append(candidate)
+
+    return sorted(discovered, key=str)
+
+
 def build_start_context(project_root: Path) -> str:
     index_path = map_root(project_root) / "CODEMAP.md"
-    pending = unacknowledged_pending(project_root)
+    submodule_roots = configured_submodule_roots(project_root)
+    submodule_indexes = [
+        map_root(submodule_root) / "CODEMAP.md"
+        for submodule_root in submodule_roots
+        if (map_root(submodule_root) / "CODEMAP.md").is_file()
+    ]
+    pending = [
+        pending_path
+        for workspace_root in (project_root, *submodule_roots)
+        for pending_path in unacknowledged_pending(workspace_root)
+    ]
+    pending.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     sections: list[str] = []
 
     if index_path.is_file():
@@ -626,15 +785,42 @@ def build_start_context(project_root: Path) -> str:
             sections.extend(
                 [
                     "A Markdown codebase map is available at docs/.codebase-map/CODEMAP.md.",
-                    "Use it as a locator before broad repository search, follow only relevant links, "
-                    "and verify paths and symbols against current source.",
-                    "<CODEMAP>",
-                    bounded,
-                    "</CODEMAP>",
+                    "Use it as a locator before broad repository search, follow only relevant "
+                    "links, and verify paths and symbols against current source.",
                 ]
             )
+            if submodule_indexes:
+                sections.extend(
+                    [
+                        "Git submodules maintain independent maps. Select the map whose worktree "
+                        "owns the target path:",
+                        "<SUBMODULE_CODEMAPS>",
+                        *[
+                            f"- {path.relative_to(project_root).as_posix()}"
+                            for path in submodule_indexes
+                        ],
+                        "</SUBMODULE_CODEMAPS>",
+                    ]
+                )
+            sections.extend(["<CODEMAP>", bounded, "</CODEMAP>"])
             if truncated:
-                sections.append("CODEMAP.md was truncated in hook context; read the file for the remainder.")
+                sections.append(
+                    "CODEMAP.md was truncated in hook context; read the file for the remainder."
+                )
+
+    if submodule_indexes and not sections:
+        sections.extend(
+            [
+                "Markdown codebase maps are available in Git submodules. Select the map whose "
+                "worktree owns the target path before broad repository search:",
+                "<SUBMODULE_CODEMAPS>",
+                *[
+                    f"- {path.relative_to(project_root).as_posix()}"
+                    for path in submodule_indexes
+                ],
+                "</SUBMODULE_CODEMAPS>",
+            ]
+        )
 
     if pending:
         sections.append(
@@ -730,9 +916,9 @@ def handle_hook(event: str) -> int:
             )
         return 0
 
-    pending_path = ensure_pending(payload)
+    pending_paths = ensure_pending(payload)
     if event == "session-end":
-        if pending_path:
+        for pending_path in pending_paths:
             try:
                 launch_optional_delegate(pending_path)
             except (MapError, OSError, KeyError, json.JSONDecodeError) as error:
@@ -742,20 +928,28 @@ def handle_hook(event: str) -> int:
                 )
         return 0
 
-    if payload.get("stop_hook_active") or pending_path is None:
+    if payload.get("stop_hook_active") or not pending_paths:
         print("{}")
         return 0
 
-    project_root = resolve_project_root(payload.get("cwd") or Path.cwd())
+    targets: list[str] = []
+    for pending_path in pending_paths:
+        try:
+            pending = json.loads(pending_path.read_text(encoding="utf-8"))
+            target_root = pending["project_root"]
+        except (OSError, KeyError, json.JSONDecodeError):
+            target_root = "unknown"
+        targets.append(f"- Project root: {target_root}\n  Pending evidence: {pending_path}")
+    target_block = "\n".join(targets)
     reason = (
         "Before finishing this turn, use $codebase-map to decide UPDATE or NO_UPDATE from the "
-        "captured project evidence. Keep durable knowledge as linked Markdown under "
-        "docs/.codebase-map; do not create a JSON or SQL graph. Inspect only the evidence and "
-        "narrowly required adjacent source. If updating, patch the affected Markdown, validate it, "
-        "then acknowledge the evidence. If nothing adds durable navigation value, acknowledge it "
-        "as no-update without touching the map.\n\n"
-        f"Project root: {project_root}\n"
-        f"Pending evidence: {pending_path}\n"
+        "captured project evidence. Each target is an independent Git worktree, including any "
+        "submodule, and must update only its own docs/.codebase-map. Keep durable knowledge as "
+        "linked Markdown; do not create a JSON or SQL graph. Inspect only the evidence and "
+        "narrowly required adjacent source. For every pending file, choose UPDATE or NO_UPDATE, "
+        "validate any changed map, then acknowledge that file.\n\n"
+        "Pending evidence targets:\n"
+        f"{target_block}\n"
         f"Skill directory: {Path(__file__).resolve().parent.parent}"
     )
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))

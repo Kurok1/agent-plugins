@@ -1,6 +1,6 @@
 ---
 name: codebase-map
-description: Maintain and navigate an incremental Markdown codebase knowledge map under docs/.codebase-map. Use when locating code from prior project knowledge, beginning focused navigation before a broad repository scan, initializing or manually updating a code map, recording durable paths/symbols/flows discovered during a Codex turn, repairing stale map entries, validating map links and code coordinates, or delegating bounded map enrichment to another model or subagent.
+description: Maintain and navigate incremental Markdown codebase knowledge maps under docs/.codebase-map, partitioned by Git worktree and submodule. Use when locating code from prior project knowledge, beginning focused navigation before a broad repository scan, initializing or manually updating a code map, recording durable paths/symbols/flows discovered during a Codex turn, repairing stale map entries, validating map links and code coordinates, handling a workspace with multiple repositories, or delegating bounded map enrichment to another model or subagent.
 ---
 
 # Codebase Map
@@ -19,6 +19,20 @@ without scanning the repository again.
   generated machine graph in the map directory.
 - Treat JSON under `PLUGIN_DATA` or the operating-system temporary directory as
   ephemeral hook evidence, never as project knowledge.
+
+## Respect Git worktree boundaries
+
+- Treat the superproject and every initialized Git submodule as independent
+  project roots. Store each map at `<owning-worktree>/docs/.codebase-map/`.
+- Determine ownership from each evidence path's deepest enclosing Git worktree,
+  not from the session working directory alone. Keep a superproject file in the
+  superproject map and a submodule file in that submodule's map.
+- Process every pending evidence file supplied by a Stop continuation. A single
+  session may produce one pending file per touched worktree; decide, validate,
+  and acknowledge each one independently.
+- Keep map edits inside the pending file's `project_root`. Record a sibling or
+  parent worktree only through its own evidence rather than copying knowledge
+  across repository boundaries.
 
 ## Keep one map language
 
@@ -78,8 +92,9 @@ no-op is a successful outcome.
 
 ## Apply an incremental update
 
-1. Read `CODEMAP.md`, the affected linked maps, and the pending hook evidence
-   when the continuation prompt provides its path.
+1. Read `CODEMAP.md`, the affected linked maps, and every pending hook evidence
+   file supplied by the continuation prompt. Match each pending file to its own
+   `project_root` and map.
 2. Determine the map language using the map-wide language rule. If the existing
    map mixes languages, include its narrative normalization in this update.
 3. Identify only the documents affected by verified facts, plus documents that
@@ -106,8 +121,8 @@ no-op is a successful outcome.
      --project-root <project-root>
    ```
 
-9. If a Stop hook supplied a pending evidence file, acknowledge it only after
-   validation succeeds:
+9. For every pending evidence file supplied by a Stop hook, acknowledge it only
+   after that worktree's validation succeeds:
 
    ```bash
    python3 <skill-dir>/scripts/codebase_map.py ack \
@@ -163,15 +178,16 @@ acknowledging the pending file.
 
 ## Understand the lifecycle hooks
 
-- `SessionStart` injects the concise `CODEMAP.md` index and warns about any
-  unacknowledged evidence.
-- `PostToolUse` records normalized in-project paths and operation types only. It
-  stores no source bodies, tool output, transcript text, credentials, or hidden
-  reasoning.
-- `Stop` requests one continuation when durable project evidence is pending.
-  It respects `stop_hook_active` to avoid a continuation loop.
-- `SessionEnd` preserves pending evidence and may start the explicitly
-  configured external runner. Its output cannot steer a closed session.
+- `SessionStart` injects the current worktree's concise `CODEMAP.md`, lists
+  available submodule map indexes, and warns about unacknowledged evidence.
+- `PostToolUse` records normalized paths and operation types only, partitioned
+  by their deepest owning Git worktree. It stores no source bodies, tool output,
+  transcript text, credentials, or hidden reasoning.
+- `Stop` requests one continuation containing every touched worktree's pending
+  evidence. It respects `stop_hook_active` to avoid a continuation loop.
+- `SessionEnd` preserves every pending file and may start the explicitly
+  configured external runner once per worktree. Its output cannot steer a
+  closed session.
 
 Hooks are an acceleration layer, not a correctness dependency. They must be
 enabled and trusted by Codex; manual invocation remains fully supported.
@@ -190,7 +206,8 @@ Finish only when all applicable conditions hold:
   `CODEMAP.md`;
 - stale verified content has been corrected regardless of who authored it;
 - validation reports no errors; and
-- supplied pending evidence is acknowledged as `updated` or `no-update`.
+- every supplied pending evidence file is acknowledged as `updated` or
+  `no-update`.
 
 Keep transcripts, raw tool output, source copies, secrets, precise line numbers,
 commit hashes, and unstable statistics out of the map.

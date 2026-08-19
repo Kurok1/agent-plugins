@@ -3,7 +3,7 @@
 在项目中维护以下结构：
 
 ```text
-docs/.code-map/
+docs/.codebase-map/
 ├── CODEMAP.md
 │
 ├── domain/
@@ -23,13 +23,30 @@ docs/.code-map/
 
 不要为了满足目录形式而创建没有实际意义的空文档。
 
+## Git 工作树与 submodule 边界
+
+这里的“项目”指代码路径所属的 Git 工作树，而不是会话启动时的工作目录。
+
+当一个主工程包含 frontend、backend 等 submodule 时：
+
+* 主工程文件维护在主工程的 `docs/.codebase-map/`
+* frontend 文件维护在 frontend submodule 的 `docs/.codebase-map/`
+* backend 文件维护在 backend submodule 的 `docs/.codebase-map/`
+
+一次会话可以同时产生多份待处理 evidence。系统必须按照每个路径最深层的
+Git 工作树分组，对每个工作树独立执行 `UPDATE` 或 `NO_UPDATE`、校验和确认，
+不得因为会话工作目录位于主工程就把 submodule 知识写入主工程地图。
+
+主工程会话启动时，应提供已有 submodule 地图的入口路径，方便 Agent 先选择
+目标工作树的 `CODEMAP.md`，再进行局部源码检索。
+
 ---
 
 # 二、核心原则
 
 ## 1. CODEMAP 是索引，不是说明书
 
-`docs/CODEMAP.md` 必须保持简洁。
+`docs/.codebase-map/CODEMAP.md` 必须保持简洁。
 
 它只负责回答：
 
@@ -117,7 +134,7 @@ src/order/services/order.service.ts:183
 生成：
 
 ```text
-docs/CODEMAP.md
+docs/.codebase-map/CODEMAP.md
 ```
 
 推荐结构：
@@ -190,7 +207,7 @@ the repository broadly.
 目录：
 
 ```text
-docs/domain/
+docs/.codebase-map/domain/
 ```
 
 Domain 文档解决的问题是：
@@ -224,7 +241,7 @@ Domain 应优先按照**业务语义**划分。
 例如：
 
 ```text
-docs/domain/order.md
+docs/.codebase-map/domain/order.md
 ```
 
 推荐格式：
@@ -330,7 +347,7 @@ Defined in:
 目录：
 
 ```text
-docs/flows/
+docs/.codebase-map/flows/
 ```
 
 Flow 文档解决的是：
@@ -483,7 +500,7 @@ Flow 文档应尽量形成清晰的调用链。
 目录：
 
 ```text
-docs/architecture/
+docs/.codebase-map/architecture/
 ```
 
 Architecture 文档回答：
@@ -596,7 +613,7 @@ Producer
 目录：
 
 ```text
-docs/dependencies/
+docs/.codebase-map/dependencies/
 ```
 
 Dependencies 文档回答：

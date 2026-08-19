@@ -1,0 +1,26 @@
+
+# ===== VS Code =====
+.vscode/
+
+# ===== macOS =====
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# ===== Windows =====
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+
+# ===== mcp-servers =====
+.mcp.json
+.mcp-server-mysql
+mcp-server-mysql-config.yaml
+.codex/config.toml
+.claude/config.toml
+
+# codebase-map
+docs/.codebase-map

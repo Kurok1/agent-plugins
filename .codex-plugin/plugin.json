@@ -1,6 +1,6 @@
 {
   "name": "agent-plugins",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Incremental Markdown codebase maps for Codex sessions",
   "author": {
     "name": "Kurok1",

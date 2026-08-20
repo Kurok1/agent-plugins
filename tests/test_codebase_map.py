@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
 import json
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -107,6 +109,47 @@ class CodebaseMapSubmoduleTest(unittest.TestCase):
                 "tool-across-worktrees",
             )
         )
+
+    @staticmethod
+    def _iso_timestamp(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00",
+            "Z",
+        )
+
+    def _acknowledge_session(
+        self,
+        project_root: Path,
+        session_id: str,
+        acknowledged_at: datetime,
+    ) -> Path:
+        session_dir = CODEBASE_MAP.runtime_session_dir(project_root, session_id)
+        events_dir = session_dir / "events"
+        events_dir.mkdir(parents=True, exist_ok=True)
+        CODEBASE_MAP.atomic_write_json(events_dir / "event.json", {})
+        pending_path = session_dir / "pending.json"
+        CODEBASE_MAP.atomic_write_json(
+            pending_path,
+            {
+                "schema_version": CODEBASE_MAP.RUNTIME_SCHEMA_VERSION,
+                "session_id": session_id,
+                "project_root": str(project_root),
+                "event_count": 1,
+                "paths": [],
+            },
+        )
+        result = CODEBASE_MAP.acknowledge_pending(
+            argparse.Namespace(
+                pending=str(pending_path),
+                outcome="no-update",
+                note="test acknowledgement",
+            )
+        )
+        acknowledgement_path = Path(result["acknowledgement"])
+        acknowledgement = json.loads(acknowledgement_path.read_text(encoding="utf-8"))
+        acknowledgement["acknowledged_at"] = self._iso_timestamp(acknowledged_at)
+        CODEBASE_MAP.atomic_write_json(acknowledgement_path, acknowledgement)
+        return Path(result["archive"])
 
     def test_post_tool_use_partitions_paths_by_owning_git_root(self) -> None:
         result = self._record_workspace_evidence()
@@ -207,7 +250,251 @@ class CodebaseMapSubmoduleTest(unittest.TestCase):
         self.assertIn("frontend/docs/.codebase-map/CODEMAP.md", context)
         self.assertIn("backend/docs/.codebase-map/CODEMAP.md", context)
 
-    def test_session_end_delegates_every_pending_worktree(self) -> None:
+    def test_cleanup_expired_acknowledged_sessions_preserves_live_evidence(self) -> None:
+        now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+        expired = now - timedelta(days=8)
+        cutoff = now - timedelta(days=CODEBASE_MAP.RUNTIME_EVIDENCE_RETENTION_DAYS)
+        recent = now - timedelta(days=6)
+
+        expired_archive = self._acknowledge_session(self.root, "expired", expired)
+        boundary_archive = self._acknowledge_session(self.frontend, "boundary", cutoff)
+        recent_archive = self._acknowledge_session(self.backend, "recent", recent)
+        current_archive = self._acknowledge_session(self.root, self.session_id, expired)
+
+        pending_archive = self._acknowledge_session(
+            self.frontend,
+            "new-pending-after-ack",
+            expired,
+        )
+        CODEBASE_MAP.atomic_write_json(
+            pending_archive.parent.parent / "pending.json",
+            {"new": "evidence"},
+        )
+        events_archive = self._acknowledge_session(
+            self.backend,
+            "new-events-after-ack",
+            expired,
+        )
+        CODEBASE_MAP.atomic_write_json(
+            events_archive.parent.parent / "events" / "new.json",
+            {"new": "evidence"},
+        )
+        invalid_archive = self._acknowledge_session(
+            self.backend,
+            "invalid-ack",
+            expired,
+        )
+        invalid_ack_path = invalid_archive / "ack.json"
+        invalid_ack = json.loads(invalid_ack_path.read_text(encoding="utf-8"))
+        invalid_ack["project_root"] = str(self.root)
+        CODEBASE_MAP.atomic_write_json(invalid_ack_path, invalid_ack)
+        invalid_utf8_archive = self._acknowledge_session(
+            self.frontend,
+            "invalid-utf8-ack",
+            expired,
+        )
+        (invalid_utf8_archive / "ack.json").write_bytes(b"\xff\xfe")
+        overflowing_time_archive = self._acknowledge_session(
+            self.root,
+            "overflowing-time-ack",
+            expired,
+        )
+        overflowing_ack_path = overflowing_time_archive / "ack.json"
+        overflowing_ack = json.loads(
+            overflowing_ack_path.read_text(encoding="utf-8")
+        )
+        overflowing_ack["acknowledged_at"] = "9999-12-31T23:59:59-23:59"
+        CODEBASE_MAP.atomic_write_json(overflowing_ack_path, overflowing_ack)
+
+        delegate_log = expired_archive.parent.parent / "pending.delegate.log"
+        delegate_log.write_text("finished\n", encoding="utf-8")
+        os.utime(delegate_log, (expired.timestamp(), expired.timestamp()))
+
+        result = CODEBASE_MAP.cleanup_runtime_evidence(self.session_id, now=now)
+
+        self.assertEqual(result["removed_archives"], 1)
+        self.assertEqual(result["errors"], 0)
+        self.assertFalse(expired_archive.exists())
+        self.assertTrue(delegate_log.exists())
+        for retained_archive in (
+            boundary_archive,
+            recent_archive,
+            current_archive,
+            pending_archive,
+            events_archive,
+            invalid_archive,
+            invalid_utf8_archive,
+            overflowing_time_archive,
+        ):
+            self.assertTrue(retained_archive.exists())
+
+    def test_cleanup_bounds_archive_inspection_and_removal(self) -> None:
+        now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+        for index in range(4):
+            self._acknowledge_session(
+                self.root,
+                f"expired-{index}",
+                now - timedelta(days=8 + index),
+            )
+
+        with mock.patch.object(
+            CODEBASE_MAP,
+            "valid_acknowledgement_time",
+            wraps=CODEBASE_MAP.valid_acknowledgement_time,
+        ) as validate_acknowledgement:
+            result = CODEBASE_MAP.cleanup_runtime_evidence(
+                self.session_id,
+                now=now,
+                max_archives=1,
+                max_inspected_archives=2,
+            )
+
+        self.assertEqual(result["scanned_archives"], 2)
+        self.assertEqual(validate_acknowledgement.call_count, 2)
+        self.assertEqual(result["removed_archives"], 1)
+
+    def test_cleanup_bounds_directory_entry_inspection(self) -> None:
+        target_runtime_root = CODEBASE_MAP.runtime_root()
+        target_runtime_root.mkdir(parents=True, exist_ok=True)
+        for index in range(5):
+            (target_runtime_root / f"project-{index}").mkdir()
+
+        result = CODEBASE_MAP.cleanup_runtime_evidence(
+            self.session_id,
+            now=datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc),
+            max_inspected_entries=3,
+        )
+
+        self.assertEqual(result["scanned_entries"], 3)
+        self.assertEqual(result["removed_archives"], 0)
+
+    def test_cleanup_rechecks_liveness_before_removal(self) -> None:
+        now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+        archive = self._acknowledge_session(
+            self.root,
+            "becomes-live",
+            now - timedelta(days=8),
+        )
+        session_dir = archive.parent.parent
+        real_liveness_check = CODEBASE_MAP.session_has_live_evidence
+        target_checks = 0
+
+        def become_live_before_removal(candidate_session: Path) -> bool:
+            nonlocal target_checks
+            if candidate_session == session_dir:
+                target_checks += 1
+                if target_checks == 2:
+                    CODEBASE_MAP.atomic_write_json(
+                        session_dir / "pending.json",
+                        {"new": "evidence"},
+                    )
+            return real_liveness_check(candidate_session)
+
+        with mock.patch.object(
+            CODEBASE_MAP,
+            "session_has_live_evidence",
+            side_effect=become_live_before_removal,
+        ):
+            result = CODEBASE_MAP.cleanup_runtime_evidence(self.session_id, now=now)
+
+        self.assertEqual(target_checks, 2)
+        self.assertEqual(result["removed_archives"], 0)
+        self.assertTrue(archive.exists())
+        self.assertTrue((session_dir / "pending.json").is_file())
+
+    @unittest.skipIf(os.name == "nt", "symlink creation may require elevated privileges")
+    def test_cleanup_does_not_follow_runtime_symlinks(self) -> None:
+        now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+        expired = now - timedelta(days=8)
+        target_runtime_root = CODEBASE_MAP.runtime_root()
+        target_runtime_root.mkdir(parents=True, exist_ok=True)
+
+        external_project = self.root / "external-project"
+        external_project.mkdir()
+        project_sentinel = external_project / "sentinel.txt"
+        project_sentinel.write_text("keep\n", encoding="utf-8")
+        (target_runtime_root / "project-link").symlink_to(
+            external_project,
+            target_is_directory=True,
+        )
+
+        project_directory = CODEBASE_MAP.runtime_project_dir(self.root)
+        project_directory.mkdir(parents=True, exist_ok=True)
+        external_session = self.root / "external-session"
+        external_session.mkdir()
+        session_sentinel = external_session / "sentinel.txt"
+        session_sentinel.write_text("keep\n", encoding="utf-8")
+        (project_directory / "session-link").symlink_to(
+            external_session,
+            target_is_directory=True,
+        )
+
+        archive_session = CODEBASE_MAP.runtime_session_dir(self.root, "archive-link")
+        archive_processed = archive_session / "processed"
+        archive_processed.mkdir(parents=True)
+        external_archive = self.root / "external-archive"
+        external_archive.mkdir()
+        archive_sentinel = external_archive / "sentinel.txt"
+        archive_sentinel.write_text("keep\n", encoding="utf-8")
+        (archive_processed / "archive-link").symlink_to(
+            external_archive,
+            target_is_directory=True,
+        )
+
+        ack_session_id = "ack-link"
+        ack_session = CODEBASE_MAP.runtime_session_dir(self.root, ack_session_id)
+        ack_archive = ack_session / "processed" / "archive"
+        ack_archive.mkdir(parents=True)
+        external_ack = self.root / "external-ack.json"
+        CODEBASE_MAP.atomic_write_json(
+            external_ack,
+            {
+                "schema_version": CODEBASE_MAP.RUNTIME_SCHEMA_VERSION,
+                "acknowledged_at": self._iso_timestamp(expired),
+                "project_root": str(self.root),
+                "session_id": ack_session_id,
+            },
+        )
+        (ack_archive / "ack.json").symlink_to(external_ack)
+
+        result = CODEBASE_MAP.cleanup_runtime_evidence(self.session_id, now=now)
+
+        self.assertEqual(result["removed_archives"], 0)
+        for sentinel in (project_sentinel, session_sentinel, archive_sentinel, external_ack):
+            self.assertTrue(sentinel.exists())
+        self.assertTrue((target_runtime_root / "project-link").is_symlink())
+        self.assertTrue((project_directory / "session-link").is_symlink())
+        self.assertTrue((archive_processed / "archive-link").is_symlink())
+        self.assertTrue((ack_archive / "ack.json").is_symlink())
+
+    def test_cleanup_continues_after_archive_removal_error(self) -> None:
+        now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+        first_archive = self._acknowledge_session(
+            self.root,
+            "first-expired",
+            now - timedelta(days=9),
+        )
+        second_archive = self._acknowledge_session(
+            self.frontend,
+            "second-expired",
+            now - timedelta(days=8),
+        )
+        real_rmtree = CODEBASE_MAP.shutil.rmtree
+
+        def flaky_rmtree(path: Path) -> None:
+            if Path(path) == first_archive:
+                raise OSError("simulated cleanup race")
+            real_rmtree(path)
+
+        with mock.patch.object(CODEBASE_MAP.shutil, "rmtree", side_effect=flaky_rmtree):
+            result = CODEBASE_MAP.cleanup_runtime_evidence(self.session_id, now=now)
+
+        self.assertEqual(result["removed_archives"], 1)
+        self.assertEqual(result["errors"], 1)
+        self.assertTrue(first_archive.exists())
+        self.assertFalse(second_archive.exists())
+
+    def test_session_end_delegates_every_pending_worktree_before_cleanup(self) -> None:
         self._record_workspace_evidence()
         hook_payload = {
             "hook_event_name": "SessionEnd",
@@ -215,16 +502,85 @@ class CodebaseMapSubmoduleTest(unittest.TestCase):
             "session_id": self.session_id,
             "turn_id": "turn-1",
         }
+        timeline: list[tuple[str, object]] = []
+        launched_pending: list[Path] = []
+
+        def launch_delegate(pending_path: Path) -> None:
+            self.assertTrue(pending_path.is_file())
+            launched_pending.append(pending_path)
+            timeline.append(("delegate", pending_path))
+
+        def cleanup(session_id: str) -> dict[str, int]:
+            self.assertEqual(len(launched_pending), 3)
+            self.assertTrue(all(path.is_file() for path in launched_pending))
+            timeline.append(("cleanup", session_id))
+            return {}
 
         with (
             mock.patch.object(CODEBASE_MAP.sys, "stdin", io.StringIO(json.dumps(hook_payload))),
-            mock.patch.object(CODEBASE_MAP, "launch_optional_delegate") as launch_delegate,
+            mock.patch.object(
+                CODEBASE_MAP,
+                "launch_optional_delegate",
+                side_effect=launch_delegate,
+            ),
+            mock.patch.object(
+                CODEBASE_MAP,
+                "cleanup_runtime_evidence",
+                side_effect=cleanup,
+            ) as cleanup_evidence,
             redirect_stdout(io.StringIO()),
         ):
             result = CODEBASE_MAP.handle_hook("session-end")
 
         self.assertEqual(result, 0)
-        self.assertEqual(launch_delegate.call_count, 3)
+        self.assertEqual([entry[0] for entry in timeline], ["delegate"] * 3 + ["cleanup"])
+        cleanup_evidence.assert_called_once_with(self.session_id)
+        pending_roots = {
+            Path(json.loads(path.read_text(encoding="utf-8"))["project_root"])
+            for path in launched_pending
+        }
+        self.assertEqual(pending_roots, {self.root, self.frontend, self.backend})
+
+    def test_session_end_runs_cleanup_without_current_pending_evidence(self) -> None:
+        hook_payload = {
+            "hook_event_name": "SessionEnd",
+            "cwd": str(self.root),
+            "session_id": "session-without-evidence",
+            "turn_id": "turn-1",
+        }
+
+        with (
+            mock.patch.object(CODEBASE_MAP.sys, "stdin", io.StringIO(json.dumps(hook_payload))),
+            mock.patch.object(CODEBASE_MAP, "launch_optional_delegate") as launch_delegate,
+            mock.patch.object(CODEBASE_MAP, "cleanup_runtime_evidence") as cleanup_evidence,
+            redirect_stdout(io.StringIO()),
+        ):
+            result = CODEBASE_MAP.handle_hook("session-end")
+
+        self.assertEqual(result, 0)
+        launch_delegate.assert_not_called()
+        cleanup_evidence.assert_called_once_with("session-without-evidence")
+
+    def test_session_end_ignores_cleanup_filesystem_errors(self) -> None:
+        hook_payload = {
+            "hook_event_name": "SessionEnd",
+            "cwd": str(self.root),
+            "session_id": "session-without-evidence",
+            "turn_id": "turn-1",
+        }
+
+        with (
+            mock.patch.object(CODEBASE_MAP.sys, "stdin", io.StringIO(json.dumps(hook_payload))),
+            mock.patch.object(
+                CODEBASE_MAP,
+                "cleanup_runtime_evidence",
+                side_effect=OSError("simulated cleanup failure"),
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            result = CODEBASE_MAP.handle_hook("session-end")
+
+        self.assertEqual(result, 0)
 
     def test_stop_prompt_includes_every_pending_worktree(self) -> None:
         self._record_workspace_evidence()

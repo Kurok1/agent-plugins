@@ -12,12 +12,13 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, TextIO
 from urllib.parse import unquote
@@ -29,6 +30,11 @@ MAX_CAPTURED_PATHS = 500
 MAX_SESSION_PATHS = 200
 MAX_RESPONSE_CHARACTERS = 1_000_000
 MAX_START_CONTEXT_CHARACTERS = 10_000
+RUNTIME_EVIDENCE_RETENTION_DAYS = 7
+MAX_RUNTIME_ARCHIVES_PER_CLEANUP = 100
+MAX_RUNTIME_ARCHIVES_INSPECTED_PER_CLEANUP = 1_000
+MAX_RUNTIME_DIRECTORY_ENTRIES_INSPECTED_PER_CLEANUP = 5_000
+MAX_RUNTIME_SESSIONS_INSPECTED_PER_CLEANUP = 500
 OPERATION_PRIORITY = {"observed": 1, "modified": 2, "created": 3, "deleted": 4}
 
 PROJECT_MARKERS = (
@@ -169,6 +175,203 @@ def is_within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def bounded_child_directories(
+    parent: Path,
+    remaining_entries: list[int],
+) -> Iterator[Path]:
+    """Yield direct directories without exceeding a shared metadata budget."""
+    if not remaining_entries or remaining_entries[0] <= 0:
+        return
+    try:
+        entries = os.scandir(parent)
+    except OSError:
+        return
+    with entries:
+        for entry in entries:
+            if remaining_entries[0] <= 0:
+                break
+            remaining_entries[0] -= 1
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    yield Path(entry.path)
+            except OSError:
+                continue
+
+
+def parse_utc_timestamp(raw_value: Any) -> datetime | None:
+    """Parse an aware ISO-8601 timestamp and normalize it to UTC."""
+    if not isinstance(raw_value, str):
+        return None
+    candidate = raw_value[:-1] + "+00:00" if raw_value.endswith("Z") else raw_value
+    try:
+        parsed = datetime.fromisoformat(candidate)
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+
+
+def session_has_live_evidence(session_dir: Path) -> bool:
+    """Return whether a session still contains evidence that may need a consumer."""
+    pending_path = session_dir / "pending.json"
+    events_dir = session_dir / "events"
+    try:
+        if pending_path.exists() or pending_path.is_symlink() or events_dir.is_symlink():
+            return True
+        return any(
+            event_path.exists() or event_path.is_symlink()
+            for event_path in events_dir.glob("*.json")
+        )
+    except OSError:
+        return True
+
+
+def valid_acknowledgement_time(
+    acknowledgement_path: Path,
+    project_directory: Path,
+    session_directory: Path,
+) -> datetime | None:
+    """Return the verified acknowledgement time for one processed archive."""
+    try:
+        if acknowledgement_path.is_symlink() or not acknowledgement_path.is_file():
+            return None
+        acknowledgement = json.loads(acknowledgement_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(acknowledgement, dict):
+        return None
+    if acknowledgement.get("schema_version") != RUNTIME_SCHEMA_VERSION:
+        return None
+
+    session_id = acknowledgement.get("session_id")
+    project_root = acknowledgement.get("project_root")
+    if not isinstance(session_id, str) or safe_component(session_id) != session_directory.name:
+        return None
+    if not isinstance(project_root, str):
+        return None
+    try:
+        expected_project_directory = stable_hash(
+            str(Path(project_root).expanduser().resolve())
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if expected_project_directory != project_directory.name:
+        return None
+    return parse_utc_timestamp(acknowledgement.get("acknowledged_at"))
+
+
+def cleanup_runtime_evidence(
+    current_session_id: str,
+    *,
+    now: datetime | None = None,
+    max_archives: int = MAX_RUNTIME_ARCHIVES_PER_CLEANUP,
+    max_inspected_archives: int = MAX_RUNTIME_ARCHIVES_INSPECTED_PER_CLEANUP,
+    max_inspected_entries: int = MAX_RUNTIME_DIRECTORY_ENTRIES_INSPECTED_PER_CLEANUP,
+    max_inspected_sessions: int = MAX_RUNTIME_SESSIONS_INSPECTED_PER_CLEANUP,
+) -> dict[str, int]:
+    """Prune expired acknowledged archives while preserving all live evidence."""
+    result = {
+        "scanned_archives": 0,
+        "scanned_entries": 0,
+        "removed_archives": 0,
+        "scanned_sessions": 0,
+        "errors": 0,
+    }
+    if (
+        max_archives <= 0
+        or max_inspected_archives <= 0
+        or max_inspected_entries <= 0
+        or max_inspected_sessions <= 0
+    ):
+        return result
+
+    reference_time = now or datetime.now(timezone.utc)
+    if reference_time.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    cutoff = reference_time.astimezone(timezone.utc) - timedelta(
+        days=RUNTIME_EVIDENCE_RETENTION_DAYS
+    )
+    target_runtime_root = runtime_root()
+    if not target_runtime_root.is_dir():
+        return result
+
+    protected_session = safe_component(current_session_id)
+    candidates: list[tuple[datetime, Path]] = []
+    inspection_complete = False
+    remaining_entries = [max_inspected_entries]
+    revalidation_reserve = min(max_archives, max_inspected_archives // 2)
+    discovery_limit = max_inspected_archives - revalidation_reserve
+    for project_directory in bounded_child_directories(
+        target_runtime_root,
+        remaining_entries,
+    ):
+        for session_directory in bounded_child_directories(
+            project_directory,
+            remaining_entries,
+        ):
+            if session_directory.name == protected_session:
+                continue
+            if result["scanned_sessions"] >= max_inspected_sessions:
+                inspection_complete = True
+                break
+            result["scanned_sessions"] += 1
+            if session_has_live_evidence(session_directory):
+                continue
+
+            processed_directory = session_directory / "processed"
+            for archive_directory in bounded_child_directories(
+                processed_directory,
+                remaining_entries,
+            ):
+                if result["scanned_archives"] >= discovery_limit:
+                    inspection_complete = True
+                    break
+                result["scanned_archives"] += 1
+                acknowledgement_time = valid_acknowledgement_time(
+                    archive_directory / "ack.json",
+                    project_directory,
+                    session_directory,
+                )
+                if acknowledgement_time is None:
+                    continue
+                if acknowledgement_time < cutoff:
+                    candidates.append((acknowledgement_time, archive_directory))
+            if inspection_complete:
+                break
+        if inspection_complete:
+            break
+
+    candidates.sort(key=lambda item: (item[0], str(item[1])))
+    for acknowledgement_time, archive_directory in candidates[:max_archives]:
+        if result["scanned_archives"] >= max_inspected_archives:
+            break
+        session_directory = archive_directory.parent.parent
+        if session_directory.name == protected_session:
+            continue
+        if session_has_live_evidence(session_directory):
+            continue
+        result["scanned_archives"] += 1
+        current_acknowledgement_time = valid_acknowledgement_time(
+            archive_directory / "ack.json",
+            session_directory.parent,
+            session_directory,
+        )
+        if current_acknowledgement_time != acknowledgement_time:
+            continue
+        if current_acknowledgement_time >= cutoff:
+            continue
+        try:
+            shutil.rmtree(archive_directory)
+        except OSError:
+            result["errors"] += 1
+            continue
+        result["removed_archives"] += 1
+
+    result["scanned_entries"] = max_inspected_entries - remaining_entries[0]
+    return result
 
 
 def is_excluded(relative_path: Path) -> bool:
@@ -922,10 +1125,17 @@ def handle_hook(event: str) -> int:
             try:
                 launch_optional_delegate(pending_path)
             except (MapError, OSError, KeyError, json.JSONDecodeError) as error:
-                atomic_write_json(
-                    pending_path.with_suffix(".delegate-error.json"),
-                    {"recorded_at": utc_now(), "error": str(error)},
-                )
+                try:
+                    atomic_write_json(
+                        pending_path.with_suffix(".delegate-error.json"),
+                        {"recorded_at": utc_now(), "error": str(error)},
+                    )
+                except OSError:
+                    pass
+        try:
+            cleanup_runtime_evidence(str(payload.get("session_id") or "unknown"))
+        except (OSError, OverflowError, RuntimeError, UnicodeError, ValueError):
+            pass
         return 0
 
     if payload.get("stop_hook_active") or not pending_paths:

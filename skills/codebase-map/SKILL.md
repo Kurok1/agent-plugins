@@ -204,9 +204,12 @@ acknowledging the pending file.
   transcript text, credentials, or hidden reasoning.
 - `Stop` requests one continuation containing every touched worktree's pending
   evidence. It respects `stop_hook_active` to avoid a continuation loop.
-- `SessionEnd` preserves every pending file and may start the explicitly
-  configured external runner once per worktree. Its output cannot steer a
-  closed session.
+- `SessionEnd` preserves live and unacknowledged evidence, starts every
+  configured external runner before cleanup, then best-effort removes at most
+  100 valid acknowledged archives older than seven days. It retains the current
+  session and any session with top-level pending or event evidence; cleanup
+  failures cannot block session end, and runner output cannot steer a closed
+  session.
 
 Hooks are an acceleration layer, not a correctness dependency. They must be
 enabled and trusted by Codex; manual invocation remains fully supported.

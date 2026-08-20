@@ -55,6 +55,43 @@ without scanning the repository again.
 Read [references/map-format.md](references/map-format.md) completely before
 initializing the map or changing its structure.
 
+## Delegate map work first
+
+Treat map navigation and Stop evidence synthesis as delegation-first work.
+When child Agents are available and active instructions allow delegation,
+dispatch this work before the parent Agent reads beyond injected context or
+processes pending evidence itself.
+
+- For session navigation, assign a child Agent to read `CODEMAP.md`, follow at
+  most one or two relevant map links, verify the selected paths and symbols
+  against focused source, and return the relevant entries, the smallest useful
+  source inspection set, and any stale or unknown facts. Use that report to
+  continue the primary task without repeating the child's map scan.
+- For a Stop continuation, assign each pending worktree to its own child Agent
+  when concurrency permits. Have each child read its pending evidence and
+  affected map documents, inspect only the source needed for verification,
+  decide `UPDATE` or `NO_UPDATE`, apply any Markdown patch, run validation, and
+  report the outcome. Dispatch remaining worktrees in later batches when there
+  are more worktrees than available child slots.
+- Keep the parent Agent responsible for assigning the correct project root,
+  reviewing each report and patch, rerunning deterministic validation, and
+  acknowledging every pending evidence file only after validation succeeds.
+  Reopen focused source when review finds a conflict; do not reconstruct a
+  successful child's investigation by default.
+- Fall back to parent execution only when child Agents are unavailable, active
+  instructions prohibit delegation, or dispatch fails. The SessionStart map
+  injection is a scope locator, not a reason to bypass an available child.
+
+Give each child only:
+
+- the pending evidence file or explicit path list;
+- the existing affected map documents;
+- [references/map-format.md](references/map-format.md); and
+- the focused source files required for verification.
+
+Ask for Markdown patches or a precise update report, not a JSON graph. Never
+let a child infer repository-wide coverage from a partial session.
+
 ## Navigate from the map
 
 1. Resolve the project root and check
@@ -151,24 +188,6 @@ python3 <skill-dir>/scripts/codebase_map.py status \
   --project-root <project-root>
 ```
 
-## Delegate bounded enrichment
-
-Keep the current Agent as the default executor. Delegate only when the user
-requests it or active instructions allow delegation and semantic enrichment is
-worth the extra model work.
-
-Give the worker only:
-
-- the pending evidence file or explicit path list;
-- the existing affected map documents;
-- [references/map-format.md](references/map-format.md);
-- the focused source files required for verification.
-
-Ask for Markdown patches or a precise update report, not a JSON graph. Require
-the parent Agent to review the result, run validation, and acknowledge pending
-evidence. Never let a worker infer repository-wide coverage from a partial
-session.
-
 An authorized external runner may be configured with
 `CODEBASE_MAP_DELEGATE_ARGV`, a JSON array of arguments supporting
 `{pending}`, `{project_root}`, `{map_root}`, `{skill_dir}`, and `{session_id}`
@@ -205,9 +224,11 @@ Finish only when all applicable conditions hold:
 - all local Markdown links resolve and all map documents are reachable from
   `CODEMAP.md`;
 - stale verified content has been corrected regardless of who authored it;
-- validation reports no errors; and
+- validation reports no errors;
 - every supplied pending evidence file is acknowledged as `updated` or
-  `no-update`.
+  `no-update`; and
+- eligible session navigation and Stop synthesis ran in child Agents, or
+  parent execution had a concrete fallback reason from the delegation rule.
 
 Keep transcripts, raw tool output, source copies, secrets, precise line numbers,
 commit hashes, and unstable statistics out of the map.

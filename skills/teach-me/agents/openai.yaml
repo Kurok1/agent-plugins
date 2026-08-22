@@ -1,0 +1,6 @@
+# @author Kurok1 <im.kurokyhanc@gmail.com>
+# @since 1.0.2
+interface:
+  display_name: "Teach Me"
+  short_description: "Turn source code into interactive visual lessons"
+  default_prompt: "Use $teach-me to trace this source flow and teach it to me as an interactive HTML lesson."

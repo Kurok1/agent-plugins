@@ -1,7 +1,7 @@
 {
   "name": "agent-plugins",
-  "version": "1.1.0",
-  "description": "Codebase maps and interactive source-code learning for Codex sessions",
+  "version": "1.2.0",
+  "description": "Opt-in codebase maps and interactive source-code learning for Codex sessions",
   "author": {
     "name": "Kurok1",
     "email": "im.kurokyhanc@gmail.com"
@@ -10,15 +10,15 @@
   "interface": {
     "displayName": "Agent Plugins",
     "shortDescription": "Map codebases and turn source flows into visual lessons.",
-    "longDescription": "Agent Plugins maintains linked Markdown codebase maps across sessions and turns verified source traces into interactive local HTML lessons for deeper code comprehension.",
+    "longDescription": "Agent Plugins enables project-scoped lifecycle hooks for linked Markdown codebase maps and turns verified source traces into interactive local HTML lessons for deeper code comprehension.",
     "developerName": "Kurok1",
     "category": "Productivity",
     "capabilities": [
       "Incremental Markdown codebase mapping",
-      "Lifecycle evidence capture",
+      "Project-scoped lifecycle evidence capture",
       "Semantic code navigation",
       "Interactive source-code lessons"
     ],
-    "defaultPrompt": "Navigate this project's codebase map or teach a source flow as an interactive HTML lesson."
+    "defaultPrompt": "Enable codebase-map hooks for this project, navigate its map, or teach a source flow as an interactive HTML lesson."
   }
 }

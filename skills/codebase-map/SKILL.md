@@ -197,6 +197,13 @@ acknowledging the pending file.
 
 ## Understand the lifecycle hooks
 
+Lifecycle hooks are opt-in per project. The plugin does not bundle a default
+`hooks/hooks.json`. When the user wants automatic evidence capture, have them
+explicitly invoke `$setup-codebase-hook`; it safely merges the handlers into
+`<project-root>/.codex/hooks.json`. Project hooks use the current installed
+runner's absolute path, so the setup skill must be rerun after the plugin moves
+or upgrades.
+
 - `SessionStart` injects the current worktree's concise `CODEMAP.md`, lists
   available submodule map indexes, and warns about unacknowledged evidence.
 - `PostToolUse` records normalized paths and operation types only, partitioned
@@ -211,8 +218,9 @@ acknowledging the pending file.
   failures cannot block session end, and runner output cannot steer a closed
   session.
 
-Hooks are an acceleration layer, not a correctness dependency. They must be
-enabled and trusted by Codex; manual invocation remains fully supported.
+Hooks are an acceleration layer, not a correctness dependency. Project hooks
+must be reviewed and trusted through Codex; manual invocation remains fully
+supported.
 
 ## Completion criteria
 

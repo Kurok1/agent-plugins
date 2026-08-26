@@ -1,0 +1,8 @@
+# @author Kurok1 <im.kurokyhanc@gmail.com>
+# @since 1.2.0
+interface:
+  display_name: "Setup Codebase Hook"
+  short_description: "Enable codebase-map hooks for this project"
+  default_prompt: "Use $setup-codebase-hook to enable codebase-map lifecycle hooks for this project."
+policy:
+  allow_implicit_invocation: false

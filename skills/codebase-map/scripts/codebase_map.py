@@ -83,7 +83,8 @@ RELATIVE_PATH_RE = re.compile(
 )
 LINE_SUFFIX_RE = re.compile(r"^(.*?):\d+(?::\d+)?(?:[:\s].*)?$")
 CONTROL_COMMAND_RE = re.compile(
-    r"\bcodebase_map\.py\b[^\n]*(?:\bhook\b|\back\b|\bpending\b|\bstatus\b|\bvalidate\b)"
+    r"(?:\bcodebase_map\.py\b[^\n]*(?:\bhook\b|\back\b|\bpending\b|\bstatus\b|"
+    r"\bvalidate\b)|\bsetup_codebase_hook\.py\b)"
 )
 SYMBOL_TOKEN_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 

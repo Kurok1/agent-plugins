@@ -1,3 +1,22 @@
+# 启用项目级 Hooks
+
+插件安装后不再自动注册全局 codebase-map hooks。只在需要维护地图的项目中显式调用：
+
+```text
+$setup-codebase-hook
+```
+
+该 skill 会将 `SessionStart`、`PostToolUse`、`Stop` 和 `SessionEnd` handler
+安全合并到项目根的 `.codex/hooks.json`。已有的其他 hooks 会被保留；重复或旧版本的
+codebase-map handler 会被刷新为当前安装版本。setup 脚本直接使用传入的项目目录，
+不会再根据 Git 或项目标记向上查找。
+
+配置完成后，通过 Codex 的 `/hooks` 审查并信任项目 hook，然后在该项目中新建 task。
+项目 hooks 使用当前安装 runner 的绝对路径，因此移动或升级插件后应重新调用一次
+`$setup-codebase-hook`。未启用 hooks 时，仍可手工调用 `$codebase-map` 维护地图。
+
+---
+
 # 一、输出目录
 
 在项目中维护以下结构：

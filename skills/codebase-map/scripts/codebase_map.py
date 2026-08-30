@@ -1028,8 +1028,9 @@ def build_start_context(project_root: Path) -> str:
 
     if pending:
         sections.append(
-            "Unacknowledged codebase-map evidence exists. Use $codebase-map to decide UPDATE or "
-            f"NO_UPDATE. Most recent evidence: {pending[0]}"
+            "Unacknowledged codebase-map evidence exists. This SessionStart hook explicitly "
+            "invokes $codebase-map to decide UPDATE or NO_UPDATE. Most recent evidence: "
+            f"{pending[0]}"
         )
     return "\n".join(sections)
 
@@ -1153,12 +1154,12 @@ def handle_hook(event: str) -> int:
         targets.append(f"- Project root: {target_root}\n  Pending evidence: {pending_path}")
     target_block = "\n".join(targets)
     reason = (
-        "Before finishing this turn, use $codebase-map to decide UPDATE or NO_UPDATE from the "
-        "captured project evidence. Each target is an independent Git worktree, including any "
-        "submodule, and must update only its own docs/.codebase-map. Keep durable knowledge as "
-        "linked Markdown; do not create a JSON or SQL graph. Inspect only the evidence and "
-        "narrowly required adjacent source. For every pending file, choose UPDATE or NO_UPDATE, "
-        "validate any changed map, then acknowledge that file.\n\n"
+        "This hook explicitly invokes $codebase-map. Before finishing this turn, decide UPDATE "
+        "or NO_UPDATE from the captured project evidence. Each target is an independent Git "
+        "worktree, including any submodule, and must update only its own docs/.codebase-map. "
+        "Keep durable knowledge as linked Markdown; do not create a JSON or SQL graph. Inspect "
+        "only the evidence and narrowly required adjacent source. For every pending file, choose "
+        "UPDATE or NO_UPDATE, validate any changed map, then acknowledge that file.\n\n"
         "Pending evidence targets:\n"
         f"{target_block}\n"
         f"Skill directory: {Path(__file__).resolve().parent.parent}"

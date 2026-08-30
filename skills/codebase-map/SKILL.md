@@ -1,6 +1,6 @@
 ---
 name: codebase-map
-description: Maintain and navigate incremental Markdown codebase knowledge maps under docs/.codebase-map, partitioned by Git worktree and submodule. Use when locating code from prior project knowledge, beginning focused navigation before a broad repository scan, initializing or manually updating a code map, recording durable paths/symbols/flows discovered during a Codex turn, repairing stale map entries, validating map links and code coordinates, handling a workspace with multiple repositories, or delegating bounded map enrichment to another model or subagent.
+description: Maintain or navigate incremental Markdown codebase maps through explicit $codebase-map invocations from the user or configured lifecycle hooks.
 ---
 
 # Codebase Map
@@ -8,6 +8,14 @@ description: Maintain and navigate incremental Markdown codebase knowledge maps 
 Maintain a small, evidence-backed navigation graph whose durable state is
 Markdown. Optimize it for answering “where should I start reading or editing?”
 without scanning the repository again.
+
+## Enter through an explicit invocation
+
+Enter this workflow only when the current user input or configured project hook
+context explicitly names `$codebase-map`. A pending-aware `SessionStart` or an
+evidence-bearing `Stop` hook provides that explicit invocation. SessionStart
+map context without pending evidence remains a locator and does not enter this
+workflow. Without project setup, ordinary sessions do not inject the skill.
 
 ## Keep one durable format
 
@@ -204,8 +212,9 @@ explicitly invoke `$setup-codebase-hook`; it safely merges the handlers into
 runner's absolute path, so the setup skill must be rerun after the plugin moves
 or upgrades.
 
-- `SessionStart` injects the current worktree's concise `CODEMAP.md`, lists
-  available submodule map indexes, and warns about unacknowledged evidence.
+- `SessionStart` injects the current worktree's concise `CODEMAP.md` and lists
+  available submodule map indexes as locator context. It explicitly invokes
+  `$codebase-map` only when unacknowledged pending evidence exists.
 - `PostToolUse` records normalized paths and operation types only, partitioned
   by their deepest owning Git worktree. It stores no source bodies, tool output,
   transcript text, credentials, or hidden reasoning.

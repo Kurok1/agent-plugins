@@ -249,6 +249,58 @@ class CodebaseMapSubmoduleTest(unittest.TestCase):
 
         self.assertIn("frontend/docs/.codebase-map/CODEMAP.md", context)
         self.assertIn("backend/docs/.codebase-map/CODEMAP.md", context)
+        self.assertNotIn("$codebase-map", context)
+
+    def test_session_start_map_without_pending_is_locator_only(self) -> None:
+        index = self.root / "docs" / ".codebase-map" / "CODEMAP.md"
+        index.parent.mkdir(parents=True)
+        index.write_text("# Root map\n", encoding="utf-8")
+
+        context = CODEBASE_MAP.build_start_context(self.root)
+
+        self.assertIn("<CODEMAP>\n# Root map\n\n</CODEMAP>", context)
+        self.assertNotIn("$codebase-map", context)
+
+    def test_session_start_without_map_or_pending_emits_no_context(self) -> None:
+        with tempfile.TemporaryDirectory() as empty_directory:
+            hook_payload = {
+                "hook_event_name": "SessionStart",
+                "cwd": empty_directory,
+                "session_id": "empty-project-session",
+            }
+            output = io.StringIO()
+
+            with (
+                mock.patch.object(
+                    CODEBASE_MAP.sys,
+                    "stdin",
+                    io.StringIO(json.dumps(hook_payload)),
+                ),
+                redirect_stdout(output),
+            ):
+                result = CODEBASE_MAP.handle_hook("session-start")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_session_start_explicitly_invokes_skill_for_pending_evidence(self) -> None:
+        self._record_workspace_evidence()
+        CODEBASE_MAP.ensure_pending(
+            {"cwd": str(self.root), "session_id": self.session_id, "turn_id": "turn-1"}
+        )
+
+        context = CODEBASE_MAP.build_start_context(self.root)
+
+        self.assertIn("This SessionStart hook explicitly invokes $codebase-map", context)
+        self.assertIn("Unacknowledged codebase-map evidence exists", context)
+
+    def test_skill_requires_explicit_invocation(self) -> None:
+        skill_config = SCRIPT_PATH.parent.parent / "agents" / "openai.yaml"
+
+        self.assertIn(
+            "\npolicy:\n  allow_implicit_invocation: false\n",
+            skill_config.read_text(encoding="utf-8"),
+        )
 
     def test_cleanup_expired_acknowledged_sessions_preserves_live_evidence(self) -> None:
         now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
@@ -602,9 +654,30 @@ class CodebaseMapSubmoduleTest(unittest.TestCase):
         response = json.loads(output.getvalue())
         self.assertEqual(result, 0)
         self.assertEqual(response["decision"], "block")
+        self.assertIn("This hook explicitly invokes $codebase-map", response["reason"])
         self.assertIn(str(self.root), response["reason"])
         self.assertIn(str(self.frontend), response["reason"])
         self.assertIn(str(self.backend), response["reason"])
+
+    def test_stop_without_evidence_does_not_invoke_skill(self) -> None:
+        hook_payload = {
+            "hook_event_name": "Stop",
+            "cwd": str(self.root),
+            "session_id": "session-without-evidence",
+            "turn_id": "turn-1",
+            "stop_hook_active": False,
+        }
+        output = io.StringIO()
+
+        with (
+            mock.patch.object(CODEBASE_MAP.sys, "stdin", io.StringIO(json.dumps(hook_payload))),
+            redirect_stdout(output),
+        ):
+            result = CODEBASE_MAP.handle_hook("stop")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(output.getvalue()), {})
+        self.assertNotIn("$codebase-map", output.getvalue())
 
 
 if __name__ == "__main__":

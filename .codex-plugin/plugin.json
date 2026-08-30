@@ -1,6 +1,6 @@
 {
   "name": "agent-plugins",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Opt-in codebase maps and interactive source-code learning for Codex sessions",
   "author": {
     "name": "Kurok1",

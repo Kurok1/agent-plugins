@@ -13,7 +13,11 @@ codebase-map handler 会被刷新为当前安装版本。setup 脚本直接使�
 
 配置完成后，通过 Codex 的 `/hooks` 审查并信任项目 hook，然后在该项目中新建 task。
 项目 hooks 使用当前安装 runner 的绝对路径，因此移动或升级插件后应重新调用一次
-`$setup-codebase-hook`。未启用 hooks 时，仍可手工调用 `$codebase-map` 维护地图。
+`$setup-codebase-hook`。`codebase-map` skill 本身只接受显式 `$codebase-map` 调用。
+启用项目 hooks 后，新会话没有 pending evidence 时，SessionStart 仅提供已有地图的
+locator 上下文（无地图时不输出上下文），不会调用该 skill；有 pending evidence 时，
+SessionStart 会显式调用它。存在 evidence 的 Stop hook 也会显式调用。未启用 hooks
+时，普通会话不会加载该 skill，仍可手工调用 `$codebase-map` 维护地图。
 
 ---
 

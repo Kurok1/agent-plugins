@@ -31,22 +31,8 @@ PROJECT_HOOK_SPECS: dict[str, dict[str, Any]] = {
         "hook_event": "session-start",
         "matcher": "startup|resume|clear|compact",
         "timeout": 3,
-        "statusMessage": "Loading codebase map",
+        "statusMessage": "Loading codebase-map checkpoints",
         "additionalContextLimit": 3500,
-    },
-    "PostToolUse": {
-        "hook_event": "post-tool-use",
-        "timeout": 2,
-    },
-    "Stop": {
-        "hook_event": "stop",
-        "timeout": 3,
-        "statusMessage": "Checking codebase map update",
-    },
-    "SessionEnd": {
-        "hook_event": "session-end",
-        "timeout": 3,
-        "statusMessage": "Preserving codebase map evidence",
     },
 }
 
@@ -234,6 +220,7 @@ def setup_project_hooks(raw_project_root: str | Path) -> dict[str, Any]:
         "hooks_file": str(hooks_path),
         "script": str(script_path),
         "events": list(PROJECT_HOOK_SPECS),
+        "maintenance_mode": "session-context-checkpoints",
     }
 
 

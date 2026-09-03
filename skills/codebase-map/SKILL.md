@@ -1,6 +1,6 @@
 ---
 name: codebase-map
-description: Maintain or navigate incremental Markdown codebase maps through explicit $codebase-map invocations from the user or configured lifecycle hooks.
+description: Maintain or navigate an incremental Markdown codebase map when the user explicitly invokes $codebase-map or a project SessionStart hook explicitly enables continuous checkpoints.
 ---
 
 # Codebase Map
@@ -9,13 +9,44 @@ Maintain a small, evidence-backed navigation graph whose durable state is
 Markdown. Optimize it for answering “where should I start reading or editing?”
 without scanning the repository again.
 
-## Enter through an explicit invocation
+## Recognize the invocation mode
 
-Enter this workflow only when the current user input or configured project hook
-context explicitly names `$codebase-map`. A pending-aware `SessionStart` or an
-evidence-bearing `Stop` hook provides that explicit invocation. SessionStart
-map context without pending evidence remains a locator and does not enter this
-workflow. Without project setup, ordinary sessions do not inject the skill.
+Enter this workflow only when current user or hook context explicitly names
+`$codebase-map`.
+
+- A user invocation requests a manual navigation or maintenance pass.
+- A project `SessionStart` hook enables continuous maintenance for the current
+  session. Its `source` is `startup`, `resume`, `clear`, or `compact`.
+- Ordinary sessions without that hook do not load this skill.
+
+The project hook is opt-in authorization to edit only the selected project’s
+map content under `docs/.codebase-map/` as supporting work. It does not expand
+authority for any other mutation.
+
+## Use knowledge checkpoints
+
+In continuous mode, stay attached to the primary task. Treat knowledge already
+present in the current conversation as candidate evidence and checkpoint it in
+small coherent batches.
+
+Use a checkpoint:
+
+- after a coherent source investigation or implementation establishes durable
+  navigation knowledge and before moving to an unrelated area;
+- immediately after a `SessionStart` hook with `source: compact`, before
+  continuing the active task; and
+- before the final response when verified, map-worthy knowledge remains
+  unrecorded.
+
+At `startup`, `resume`, or `clear`, activate the policy and continue the primary
+task. Do not scan or write merely because the session started. At `compact`, use
+the retained compacted context, decide `UPDATE` or `NO_UPDATE`, then resume the
+same task. Batch facts by affected map document rather than updating after each
+tool call.
+
+Conversation knowledge is a locator, not proof. Reopen the smallest relevant
+source set before writing. A `NO_UPDATE` checkpoint is silent and leaves the map
+untouched.
 
 ## Keep one durable format
 
@@ -23,82 +54,87 @@ workflow. Without project setup, ordinary sessions do not inject the skill.
 - Use `CODEMAP.md` as the concise entry index.
 - Put detail in linked `domain/`, `flows/`, `architecture/`, and
   `dependencies/` Markdown documents only when the repository justifies them.
-- Treat Markdown links as graph edges. Keep no `graph.json`, SQL database, or
-  generated machine graph in the map directory.
-- Treat JSON under `PLUGIN_DATA` or the operating-system temporary directory as
-  ephemeral hook evidence, never as project knowledge.
+- Treat links between Markdown map documents as graph edges. Keep durable map
+  knowledge in Markdown.
+- Allow supporting files such as images and diagrams beside the Markdown map.
+  They are not map-document graph nodes and do not need to be reachable from
+  `CODEMAP.md`; any local path referenced by Markdown must still resolve.
+- Keep transcripts, tool output, source copies, secrets, and hidden reasoning
+  outside the map. Do not use a supporting file as a parallel knowledge store.
+
+Read [references/map-format.md](references/map-format.md) completely before
+initializing the map or changing its structure.
 
 ## Respect Git worktree boundaries
 
-- Treat the superproject and every initialized Git submodule as independent
-  project roots. Store each map at `<owning-worktree>/docs/.codebase-map/`.
-- Determine ownership from each evidence path's deepest enclosing Git worktree,
-  not from the session working directory alone. Keep a superproject file in the
-  superproject map and a submodule file in that submodule's map.
-- Process every pending evidence file supplied by a Stop continuation. A single
-  session may produce one pending file per touched worktree; decide, validate,
-  and acknowledge each one independently.
-- Keep map edits inside the pending file's `project_root`. Record a sibling or
-  parent worktree only through its own evidence rather than copying knowledge
-  across repository boundaries.
+Assign every relevant path to exactly one **owning root** before reading or
+writing a map. The owning root determines the map location, update decision,
+and validation target.
+
+| Project shape | Owning root | Map layout |
+| --- | --- | --- |
+| Non-Git project | Explicit or resolved project directory | One map under that directory |
+| One Git checkout | `git rev-parse --show-toplevel` for that checkout | One map under the Git top-level |
+| Superproject with submodules | Superproject plus each initialized submodule, recursively | One independent map per Git top-level |
+
+### Non-Git project
+
+- Use the project directory explicitly named by the user or configured by the
+  project hook. Without either, use the resolved session project directory;
+  fall back to the current working directory.
+- Store one map at `<project-root>/docs/.codebase-map/`. Nested package or build
+  directories do not create additional map roots.
+- Include only paths inside that root. A sibling or parent directory enters the
+  checkpoint only when the user explicitly scopes it as another project.
+- Decide `UPDATE` or `NO_UPDATE` once and validate once for the project root.
+
+### Single Git project
+
+- Use the current checkout’s `git rev-parse --show-toplevel`, not the Git common
+  directory, as the owning root. A linked Git worktree therefore maintains the
+  map in its own checkout.
+- Store one map at `<git-top-level>/docs/.codebase-map/`. Nested package,
+  workspace, or project-marker directories remain part of this map.
+- Assign every relevant path whose Git top-level is this root to the same
+  checkpoint. If a path resolves to another Git top-level, use the multi-root
+  rules below.
+- Decide `UPDATE` or `NO_UPDATE` once and validate once for the Git top-level.
+
+### Git superproject with submodules
+
+- Treat the superproject and every initialized submodule as independent owning
+  roots. Apply the same rule recursively to nested submodules.
+- For each relevant path, resolve the deepest enclosing Git top-level. For a
+  deleted or moved path, resolve from its nearest existing parent. Superproject
+  files such as `.gitmodules` belong to the superproject; files below an
+  initialized submodule belong to that submodule.
+- Leave an uninitialized submodule out of the checkpoint because its source is
+  unavailable for verification. Its configured path alone is not source
+  evidence.
+- Keep detailed source knowledge in the owning map. A superproject map may
+  record a verified integration edge or route to an available submodule map,
+  but it does not duplicate the submodule’s internal symbols and flows.
+- Partition a checkpoint that touches multiple roots. For each root, make an
+  independent `UPDATE` or `NO_UPDATE` decision, edit only that root’s
+  `docs/.codebase-map/`, and run validation with that root as `--project-root`.
+- Complete ownership only when every relevant path has one owning root and
+  every updated root has passed its own validation.
 
 ## Keep one map language
 
 - Establish one primary natural language before writing. Use an explicit user
   preference first, otherwise the existing `CODEMAP.md` language, then the
-  current conversation language, and finally the repository's primary
+  current conversation language, and finally the repository’s primary
   documentation language.
 - Use that language for narrative text across every Markdown document under
   `docs/.codebase-map/`, including headings, table labels, descriptions,
-  relationships, and flow explanations. Never create an English detail map
-  under a Chinese index, or a Chinese detail map under an English index.
-- When an existing map mixes primary languages, normalize all map documents to
-  the selected language as part of the next `UPDATE`. Preserve verified facts,
-  links, and organization while translating; language normalization does not
-  justify adding unverified knowledge.
-- Keep source paths, symbols, identifiers, commands, code blocks, configuration
-  keys, protocol names, API names, and established technical terms unchanged.
-  Write the surrounding explanation in the selected map language.
-
-Read [references/map-format.md](references/map-format.md) completely before
-initializing the map or changing its structure.
-
-## Delegate map work first
-
-Treat map navigation and Stop evidence synthesis as delegation-first work.
-When child Agents are available and active instructions allow delegation,
-dispatch this work before the parent Agent reads beyond injected context or
-processes pending evidence itself.
-
-- For session navigation, assign a child Agent to read `CODEMAP.md`, follow at
-  most one or two relevant map links, verify the selected paths and symbols
-  against focused source, and return the relevant entries, the smallest useful
-  source inspection set, and any stale or unknown facts. Use that report to
-  continue the primary task without repeating the child's map scan.
-- For a Stop continuation, assign each pending worktree to its own child Agent
-  when concurrency permits. Have each child read its pending evidence and
-  affected map documents, inspect only the source needed for verification,
-  decide `UPDATE` or `NO_UPDATE`, apply any Markdown patch, run validation, and
-  report the outcome. Dispatch remaining worktrees in later batches when there
-  are more worktrees than available child slots.
-- Keep the parent Agent responsible for assigning the correct project root,
-  reviewing each report and patch, rerunning deterministic validation, and
-  acknowledging every pending evidence file only after validation succeeds.
-  Reopen focused source when review finds a conflict; do not reconstruct a
-  successful child's investigation by default.
-- Fall back to parent execution only when child Agents are unavailable, active
-  instructions prohibit delegation, or dispatch fails. The SessionStart map
-  injection is a scope locator, not a reason to bypass an available child.
-
-Give each child only:
-
-- the pending evidence file or explicit path list;
-- the existing affected map documents;
-- [references/map-format.md](references/map-format.md); and
-- the focused source files required for verification.
-
-Ask for Markdown patches or a precise update report, not a JSON graph. Never
-let a child infer repository-wide coverage from a partial session.
+  relationships, and flow explanations.
+- When an existing map mixes primary languages, normalize its narrative text
+  as part of the next `UPDATE`. Preserve verified facts, links, and organization
+  while translating.
+- Keep source paths, symbols, identifiers, commands, code blocks,
+  configuration keys, protocol names, API names, and established technical
+  terms unchanged.
 
 ## Navigate from the map
 
@@ -107,19 +143,20 @@ let a child infer repository-wide coverage from a partial session.
 2. Read `CODEMAP.md`, then follow at most one or two relevant map links before
    opening focused source files.
 3. Verify every selected path and symbol against current source before editing.
-4. Treat a missing map entry as unknown rather than evidence that code does not
-   exist. Use focused repository search when the map reaches its boundary.
+4. Treat a missing map entry as unknown. Use focused repository search when the
+   map reaches its boundary.
 
 Complete navigation when the map identifies a small source inspection set or
-clearly does not cover the requested area.
+clearly does not cover the requested area. In continuous mode, use the injected
+map only when it is relevant to the primary task.
 
 ## Decide `UPDATE` or `NO_UPDATE`
 
 Use paths and relationships actually inspected, searched, or changed in the
-current turn or session. Expand only to adjacent source needed to verify those
+current conversation. Expand only to adjacent source required to verify those
 facts.
 
-Choose `UPDATE` when the evidence establishes at least one durable fact that
+Choose `UPDATE` when the checkpoint establishes at least one durable fact that
 will reduce future code-location work, including:
 
 - a runtime or repository entry point;
@@ -130,34 +167,32 @@ will reduce future code-location work, including:
 - existing map documents whose narrative text uses inconsistent primary
   languages.
 
-Choose `NO_UPDATE` when the turn discovered no relevant project paths, repeated
-facts already represented accurately, or produced only temporary debugging
-details, and the existing map already uses one consistent primary language. A
-no-op is a successful outcome.
+Choose `NO_UPDATE` when the checkpoint discovered no relevant project paths,
+repeated facts already represented accurately, or produced only temporary
+debugging details. A no-op is a successful checkpoint.
 
 ## Apply an incremental update
 
-1. Read `CODEMAP.md`, the affected linked maps, and every pending hook evidence
-   file supplied by the continuation prompt. Match each pending file to its own
-   `project_root` and map.
-2. Determine the map language using the map-wide language rule. If the existing
-   map mixes languages, include its narrative normalization in this update.
-3. Identify only the documents affected by verified facts, plus documents that
-   require language normalization. Initialize the smallest useful map when none
-   exists; do not scan the whole repository just to fill the directory shape.
+For each affected owning worktree:
+
+1. Read `CODEMAP.md` and only the linked map documents implicated by current
+   conversation knowledge.
+2. Determine the map language. Include narrative normalization only when the
+   existing map mixes primary languages.
+3. Identify only the documents affected by verified facts. Initialize the
+   smallest useful map when none exists; do not scan the repository merely to
+   fill a directory shape.
 4. Reopen the relevant source and verify paths, symbols, call direction, state
-   changes, side effects, and dependencies. Mark unresolved claims with
-   map-language equivalents of `Unknown` or `Unconfirmed` (for example,
-   `未知` or `未确认` in Chinese), or omit them.
-5. Patch the affected Markdown locally. Preserve stable organization and
-   unrelated valid content. Avoid whole-map regeneration and Markdown churn.
+   changes, side effects, and dependencies. Mark unresolved claims with the
+   map-language equivalent of `Unknown` or `Unconfirmed`, or omit them.
+5. Patch affected Markdown locally. Touch a supporting asset only when it
+   directly serves a map document. Preserve stable organization and unrelated
+   valid content. Avoid whole-map regeneration and Markdown churn.
 6. Update `CODEMAP.md` only when its navigation choices changed. Add reciprocal
-   Domain/Flow/Dependency links where they materially improve navigation.
-7. Remove or replace any existing statement—whether Agent-authored or
-   human-authored—when current repository evidence proves it stale or wrong.
-   Preserve unverified conflicting content and mark the conflict with the
-   map-language equivalent of `Unconfirmed`; authorship alone is neither a
-   protection nor a reason to overwrite.
+   Domain/Flow/Dependency links only when they materially improve navigation.
+7. Remove or replace a statement when current repository evidence proves it
+   stale or wrong. Preserve unresolved conflicts and mark them `Unconfirmed` in
+   the map language.
 8. Run deterministic validation, then manually confirm every changed symbol
    and execution-flow claim:
 
@@ -166,89 +201,57 @@ no-op is a successful outcome.
      --project-root <project-root>
    ```
 
-9. For every pending evidence file supplied by a Stop hook, acknowledge it only
-   after that worktree's validation succeeds:
-
-   ```bash
-   python3 <skill-dir>/scripts/codebase_map.py ack \
-     --pending <pending-json-path> \
-     --outcome updated
-   ```
-
-For `NO_UPDATE`, acknowledge the same file with `--outcome no-update` and a
-short `--note` explaining why. Do not create or touch map documents for a
-no-op.
+For `NO_UPDATE`, do not create or touch map documents.
 
 ## Update manually
 
-When invoked without a hook continuation:
+When invoked by the user without continuous hook context:
 
 1. Use the current conversation’s inspected paths and the user’s stated scope
-   as evidence.
-2. Follow the same `UPDATE`/`NO_UPDATE` gate and incremental update workflow.
-3. Run `validate` after a write. No acknowledgement is required when no pending
-   evidence file exists.
+   as candidate evidence.
+2. Follow the same `UPDATE`/`NO_UPDATE` gate and incremental workflow.
+3. Run `validate` after a write.
 
-Use the status command when diagnosing hook behavior:
+Use the status command when diagnosing setup or map state:
 
 ```bash
 python3 <skill-dir>/scripts/codebase_map.py status \
   --project-root <project-root>
 ```
 
-An authorized external runner may be configured with
-`CODEBASE_MAP_DELEGATE_ARGV`, a JSON array of arguments supporting
-`{pending}`, `{project_root}`, `{map_root}`, `{skill_dir}`, and `{session_id}`
-placeholders. The SessionEnd hook launches it only as a fallback; the runner is
-responsible for reading this Skill, editing Markdown, validating, and
-acknowledging the pending file.
+## Understand the lifecycle hook
 
-## Understand the lifecycle hooks
+Lifecycle maintenance is opt-in per project. The plugin does not bundle a
+global hook. When the user wants it configured by the plugin, they explicitly
+invoke `$setup-codebase-hook` for that project.
 
-Lifecycle hooks are opt-in per project. The plugin does not bundle a default
-`hooks/hooks.json`. When the user wants automatic evidence capture, have them
-explicitly invoke `$setup-codebase-hook`; it safely merges the handlers into
-`<project-root>/.codex/hooks.json`. Project hooks use the current installed
-runner's absolute path, so the setup skill must be rerun after the plugin moves
-or upgrades.
+The configured lifecycle has one handler:
 
-- `SessionStart` injects the current worktree's concise `CODEMAP.md` and lists
-  available submodule map indexes as locator context. It explicitly invokes
-  `$codebase-map` only when unacknowledged pending evidence exists.
-- `PostToolUse` records normalized paths and operation types only, partitioned
-  by their deepest owning Git worktree. It stores no source bodies, tool output,
-  transcript text, credentials, or hidden reasoning.
-- `Stop` requests one continuation containing every touched worktree's pending
-  evidence. It respects `stop_hook_active` to avoid a continuation loop.
-- `SessionEnd` preserves live and unacknowledged evidence, starts every
-  configured external runner before cleanup, then best-effort removes at most
-  100 valid acknowledged archives older than seven days. It retains the current
-  session and any session with top-level pending or event evidence; cleanup
-  failures cannot block session end, and runner output cannot steer a closed
-  session.
+- `SessionStart` matches `startup|resume|clear|compact`, injects the continuous
+  maintenance instruction, includes the current worktree’s concise
+  `CODEMAP.md`, and lists initialized submodule map indexes.
+- After root-session compaction, `source: compact` delivers the checkpoint to
+  the immediate model continuation, which can use its retained conversation
+  context directly.
 
-Hooks are an acceleration layer, not a correctness dependency. Project hooks
-must be reviewed and trusted through Codex; manual invocation remains fully
-supported.
+The lifecycle is stateless: `SessionStart` injects context and the Agent updates
+map documents directly from verified conversation knowledge at checkpoints.
 
 ## Completion criteria
 
-Finish only when all applicable conditions hold:
+Finish a checkpoint only when all applicable conditions hold:
 
+- the primary task can continue without a map-maintenance detour;
 - `CODEMAP.md` remains a concise index rather than a source-code substitute;
 - every map document uses one consistent primary natural language, except for
   preserved code identifiers and established technical terms;
 - every changed code coordinate uses a real project-relative link and a
   verified symbol where one exists;
 - every changed relationship and flow is supported by current source;
-- all local Markdown links resolve and all map documents are reachable from
-  `CODEMAP.md`;
-- stale verified content has been corrected regardless of who authored it;
-- validation reports no errors;
-- every supplied pending evidence file is acknowledged as `updated` or
-  `no-update`; and
-- eligible session navigation and Stop synthesis ran in child Agents, or
-  parent execution had a concrete fallback reason from the delegation rule.
+- every local link in a Markdown map document resolves, and every Markdown map
+  document is reachable from `CODEMAP.md`;
+- stale verified content has been corrected; and
+- validation reports no errors for every changed worktree.
 
-Keep transcripts, raw tool output, source copies, secrets, precise line numbers,
-commit hashes, and unstable statistics out of the map.
+Keep precise line numbers, commit hashes, unstable statistics, and temporary
+task details out of the map.

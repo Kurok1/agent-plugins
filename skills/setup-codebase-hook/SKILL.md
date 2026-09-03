@@ -1,11 +1,11 @@
 ---
 name: setup-codebase-hook
-description: Install or refresh codebase-map lifecycle hooks in the current project's .codex/hooks.json. Use when the user explicitly wants to enable codebase-map hooks for one project.
+description: Install or refresh the codebase-map SessionStart hook in the current project's .codex/hooks.json. Use when the user explicitly wants continuous codebase-map checkpoints for one project.
 ---
 
 # Setup Codebase Hook
 
-Enable automatic codebase-map evidence capture only for the selected project.
+Enable continuous codebase-map knowledge checkpoints only for the selected project.
 
 ## Workflow
 
@@ -18,11 +18,11 @@ Enable automatic codebase-map evidence capture only for the selected project.
      --project-root <project-root>
    ```
 
-3. Read the JSON result. Report the resolved project root and `.codex/hooks.json` path. A `changed: false` result means the project was already configured with the current runner.
+3. Read the JSON result. Report the resolved project root and `.codex/hooks.json` path. A `changed: false` result means the project already has the current `SessionStart` handler.
 4. Tell the user to open `/hooks`, review and trust the project hook definition, then start a new task in that project so all lifecycle events load from the beginning.
 
-The setup command owns only codebase-map command handlers. It preserves other project hooks, folds stale or duplicate codebase-map handlers into one handler per event, and refuses unsafe symlinks, invalid JSON, or a same-layer `.codex/config.toml` with inline hooks.
+The setup command owns only the codebase-map `SessionStart` command handler. It preserves every other project hook, folds duplicate codebase-map `SessionStart` handlers into one, and refuses unsafe symlinks, invalid JSON, or a same-layer `.codex/config.toml` with inline hooks.
 
-Project hooks store the absolute path of the currently installed codebase-map runner because plugin-only `PLUGIN_ROOT` variables are unavailable at the project hook layer. Re-run this skill after moving or upgrading the plugin to refresh that path.
+The handler matches `startup|resume|clear|compact`. It injects continuous maintenance instructions and the available map indexes; it does not capture tool calls or create runtime evidence files. Project hooks store the absolute path of the currently installed codebase-map runner because plugin-only `PLUGIN_ROOT` variables are unavailable at the project hook layer. Re-run this skill after moving or upgrading the plugin to refresh that path.
 
 Keep this workflow project-local. Write neither plugin-bundled hooks nor user-global Codex hooks.

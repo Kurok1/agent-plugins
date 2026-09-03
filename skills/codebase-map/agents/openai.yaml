@@ -2,7 +2,7 @@
 # @since 0.1.0
 interface:
   display_name: "Codebase Map"
-  short_description: "Maintain an incremental Markdown codebase map"
-  default_prompt: "Use $codebase-map to update the Markdown codebase map from verified knowledge discovered in this session."
+  short_description: "Maintain maps from session knowledge checkpoints"
+  default_prompt: "Use $codebase-map to maintain the Markdown codebase map from verified knowledge in this conversation."
 policy:
   allow_implicit_invocation: false

@@ -33,15 +33,20 @@ docs/.codebase-map/
 │   ├── module-boundaries.md
 │   ├── data-flow.md
 │   └── event-system.md
-└── dependencies/
-    └── <dependency>.md
+├── dependencies/
+│   └── <dependency>.md
+└── assets/
+    └── <supporting-file>
 ```
 
 Create only documents with current navigation value. Do not create empty
 folders or placeholder maps to satisfy the shape. Use kebab-case filenames.
 
-`CODEMAP.md` is the only required document once a map exists. Markdown is the
-only durable format in this directory.
+`CODEMAP.md` is the only required document once a map exists. Every semantic
+navigation document must be Markdown. Supporting files such as images and
+diagrams may coexist when they serve those documents, but they are not graph
+nodes and do not need to be reachable from `CODEMAP.md`. Do not use them as a
+parallel knowledge store.
 
 ## Writing rules
 
@@ -368,8 +373,9 @@ After every update, confirm:
 - [ ] Changed symbols exist in current source.
 - [ ] Flow order follows actual calls or events.
 - [ ] State changes, persistence, side effects, and failure behavior are evidence-backed.
-- [ ] Local Markdown links resolve.
-- [ ] Detailed map documents are reachable from `CODEMAP.md`.
+- [ ] Every local link in a Markdown map document resolves, including links to supporting files.
+- [ ] Detailed Markdown map documents are reachable from `CODEMAP.md`.
+- [ ] Supporting files are purposeful and are not parallel knowledge stores.
 - [ ] Domain, Flow, and Dependency cross-links are useful and consistent.
 - [ ] All map documents use one primary natural language, apart from code identifiers and established technical terms.
 - [ ] No graph database, JSON knowledge store, source copy, transcript, secret, or unstable statistic was added.

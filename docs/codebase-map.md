@@ -6,18 +6,25 @@
 $setup-codebase-hook
 ```
 
-该 skill 会将 `SessionStart`、`PostToolUse`、`Stop` 和 `SessionEnd` handler
+该 skill 会将一个匹配 `startup|resume|clear|compact` 的 `SessionStart` handler
 安全合并到项目根的 `.codex/hooks.json`。已有的其他 hooks 会被保留；重复或旧版本的
-codebase-map handler 会被刷新为当前安装版本。setup 脚本直接使用传入的项目目录，
-不会再根据 Git 或项目标记向上查找。
+codebase-map `SessionStart` handler 会被刷新为当前安装版本。setup 脚本直接使用传入的
+项目目录，不会再根据 Git 或项目标记向上查找。
 
 配置完成后，通过 Codex 的 `/hooks` 审查并信任项目 hook，然后在该项目中新建 task。
 项目 hooks 使用当前安装 runner 的绝对路径，因此移动或升级插件后应重新调用一次
-`$setup-codebase-hook`。`codebase-map` skill 本身只接受显式 `$codebase-map` 调用。
-启用项目 hooks 后，新会话没有 pending evidence 时，SessionStart 仅提供已有地图的
-locator 上下文（无地图时不输出上下文），不会调用该 skill；有 pending evidence 时，
-SessionStart 会显式调用它。存在 evidence 的 Stop hook 也会显式调用。未启用 hooks
-时，普通会话不会加载该 skill，仍可手工调用 `$codebase-map` 维护地图。
+`$setup-codebase-hook`。`codebase-map` skill 本身只接受显式 `$codebase-map` 调用；
+项目 `SessionStart` hook 会显式调用它并启用本会话的持续维护模式。
+
+`startup`、`resume`、`clear` 只注入维护策略和已有地图入口，不会因为会话启动就扫描
+仓库或写地图。Agent 在完成一段连贯的源码调查或实现后，直接使用当前会话中已经获得的
+知识作为候选，在自然检查点执行一次 `UPDATE` 或 `NO_UPDATE`。`compact` 会在压缩后的
+下一次模型续跑前重新注入提示，让 Agent 先用保留下来的会话上下文完成一次小检查点，
+再继续原任务。
+
+整个流程没有运行时状态；`SessionStart` 注入上下文，Agent 在检查点直接把经过源码
+复核的会话知识更新到 Markdown 地图文档。未启用 hook 时，普通会话不会加载该 skill，仍可
+手工调用 `$codebase-map` 维护地图。
 
 ---
 
@@ -38,30 +45,62 @@ docs/.codebase-map/
 ├── architecture/
 │   ├── ...
 │
-└── dependencies/
-    ├── ...
+├── dependencies/
+│   ├── ...
+│
+└── assets/
+    └── ...
 ```
 
 根据实际代码仓库生成具体文件。
 
 不要为了满足目录形式而创建没有实际意义的空文档。
 
+`CODEMAP.md` 及承载语义导航知识的明细文档使用 Markdown。图片、图表等辅助文件可以
+共存于该目录，但不参与从 `CODEMAP.md` 开始的文档可达性判断；Markdown 引用的任意
+本地目标仍必须存在。辅助文件不能成为并行的 JSON 知识库、源码副本或会话记录。
+
 ## Git 工作树与 submodule 边界
 
-这里的“项目”指代码路径所属的 Git 工作树，而不是会话启动时的工作目录。
+每条相关路径必须且只能归属一个 **owning root**。owning root 决定地图目录、
+`UPDATE`/`NO_UPDATE` 决策边界和校验目标。
 
-当一个主工程包含 frontend、backend 等 submodule 时：
+| 工程形态 | owning root | 地图布局 |
+| --- | --- | --- |
+| 普通非 Git 工程 | 用户、项目 hook 或会话明确解析出的项目目录 | 该目录下维护一份地图 |
+| 单 Git checkout | 当前 checkout 的 `git rev-parse --show-toplevel` | Git top-level 下维护一份地图 |
+| 含 submodule 的 Git 主工程 | superproject 与每个已初始化 submodule（递归） | 每个 Git top-level 独立维护一份地图 |
 
-* 主工程文件维护在主工程的 `docs/.codebase-map/`
-* frontend 文件维护在 frontend submodule 的 `docs/.codebase-map/`
-* backend 文件维护在 backend submodule 的 `docs/.codebase-map/`
+### 普通非 Git 工程
 
-一次会话可以同时产生多份待处理 evidence。系统必须按照每个路径最深层的
-Git 工作树分组，对每个工作树独立执行 `UPDATE` 或 `NO_UPDATE`、校验和确认，
-不得因为会话工作目录位于主工程就把 submodule 知识写入主工程地图。
+优先使用用户或项目 hook 明确指定的项目目录；没有显式根目录时使用会话解析出的项目
+目录，最后回退到当前工作目录。所有内部 package、模块或构建目录共享
+`<project-root>/docs/.codebase-map/`，不会因为存在 `package.json`、`pom.xml` 等标记
+再拆地图。项目根以外的父级或兄弟目录只有在用户另行指定时才进入检查点。整个项目只做
+一次 `UPDATE` 或 `NO_UPDATE` 决策和一次校验。
 
-主工程会话启动时，应提供已有 submodule 地图的入口路径，方便 Agent 先选择
-目标工作树的 `CODEMAP.md`，再进行局部源码检索。
+### 单 Git 工程
+
+使用当前 checkout 的 Git top-level，而不是 Git common directory；因此 linked
+worktree 在自己的 checkout 中维护地图。只要相关路径解析到同一个 Git top-level，
+内部 package、workspace 和其他项目标记都归入同一份地图。若某条路径解析到另一个
+Git top-level，则切换为下面的多 root 规则。
+
+### 含 submodule 的 Git 主工程
+
+superproject、每个已初始化 submodule 以及嵌套 submodule 都是独立 owning root。
+对每条路径选择最深层的 Git top-level；路径已删除或跨 root 移动时，从最近仍存在的
+父目录解析归属。`.gitmodules` 等主工程文件属于 superproject，submodule 内源码属于
+对应 submodule。未初始化 submodule 因无法复核源码，不进入本次检查点。
+
+跨多个 root 的检查点必须先按 owning root 分组，再对每组独立执行 `UPDATE` 或
+`NO_UPDATE`、只修改该 root 的 `docs/.codebase-map/`，并以该 root 运行校验。主工程
+地图可以记录经验证的集成边或指向已有 submodule 地图，但 submodule 的内部 symbol 和
+flow 只保存在其自身地图中。所有相关路径均已唯一归属、且每个发生更新的 root 都独立
+校验通过后，这个检查点才算完成。
+
+主工程会话启动时，应提供已有 submodule 地图的入口路径，方便 Agent 先选择目标 root
+的 `CODEMAP.md`，再进行局部源码检索。
 
 ---
 
@@ -1048,12 +1087,14 @@ CODEMAP.md
 * [ ] 主要领域是否都有对应导航
 * [ ] 主要跨模块业务流程是否有 Flow
 * [ ] 文件路径是否真实存在
+* [ ] Markdown 文档中的本地链接是否都能解析，包括指向辅助文件的链接
 * [ ] Symbol 是否真实存在
 * [ ] Flow 是否基于实际调用链
 * [ ] 是否避免主要依赖行号
 * [ ] Domain 与 Flow 是否互相链接
 * [ ] Dependencies 是否只包含重要运行依赖
 * [ ] 是否存在大量可以删除而不影响代码导航的信息
+* [ ] 辅助文件是否确有用途，且没有承载并行知识库
 * [ ] Agent 能否从一个常见修改需求在 2~3 次文档跳转内定位到核心源码
 
 如果最后一条无法满足，应优先优化导航结构。

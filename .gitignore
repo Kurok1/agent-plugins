@@ -24,3 +24,6 @@ mcp-server-mysql-config.yaml
 
 # codebase-map
 docs/.codebase-map
+
+# tests
+tests

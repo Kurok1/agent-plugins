@@ -1,6 +1,6 @@
 ---
 name: codebase-map
-description: Maintain or navigate an incremental Markdown codebase map when the user explicitly invokes $codebase-map or a project SessionStart hook explicitly enables continuous checkpoints.
+description: Maintain or navigate an incremental Markdown codebase map when the user invokes $codebase-map or hook context contains a CODEBASE_MAP_CHECKPOINT for continuous maintenance.
 ---
 
 # Codebase Map
@@ -11,13 +11,14 @@ without scanning the repository again.
 
 ## Recognize the invocation mode
 
-Enter this workflow only when current user or hook context explicitly names
-`$codebase-map`.
+Enter this workflow when the current user invokes `$codebase-map` or hook
+context contains `CODEBASE_MAP_CHECKPOINT`.
 
 - A user invocation requests a manual navigation or maintenance pass.
 - A project `SessionStart` hook enables continuous maintenance for the current
   session. Its `source` is `startup`, `resume`, `clear`, or `compact`.
-- Ordinary sessions without that hook do not load this skill.
+- Ordinary sessions without that hook enter this workflow only through a user
+  invocation.
 
 The project hook is opt-in authorization to edit only the selected project’s
 map content under `docs/.codebase-map/` as supporting work. It does not expand

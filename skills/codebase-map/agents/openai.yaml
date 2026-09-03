@@ -4,5 +4,3 @@ interface:
   display_name: "Codebase Map"
   short_description: "Maintain maps from session knowledge checkpoints"
   default_prompt: "Use $codebase-map to maintain the Markdown codebase map from verified knowledge in this conversation."
-policy:
-  allow_implicit_invocation: false

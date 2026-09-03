@@ -312,8 +312,7 @@ def build_start_context(project_root: Path, source: str = "startup") -> str:
         raise MapError(f"Unsupported SessionStart source: {source}")
 
     sections = [
-        "This SessionStart hook explicitly invokes $codebase-map in continuous "
-        "maintenance mode.",
+        "Use $codebase-map in continuous maintenance mode for this session.",
         '<CODEBASE_MAP_CHECKPOINT source="' + source + '">',
         "Use verified knowledge already present in the current conversation as candidate "
         "map knowledge. Use only the current conversation and focused source as evidence "

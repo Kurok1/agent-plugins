@@ -13,8 +13,8 @@ codebase-map `SessionStart` handler 会被刷新为当前安装版本。setup �
 
 配置完成后，通过 Codex 的 `/hooks` 审查并信任项目 hook，然后在该项目中新建 task。
 项目 hooks 使用当前安装 runner 的绝对路径，因此移动或升级插件后应重新调用一次
-`$setup-codebase-hook`。`codebase-map` skill 本身只接受显式 `$codebase-map` 调用；
-项目 `SessionStart` hook 会显式调用它并启用本会话的持续维护模式。
+`$setup-codebase-hook`。`codebase-map` skill 使用默认的模型自动发现，使项目
+`SessionStart` hook 注入的 `$codebase-map` 能加载完整 skill 指令；用户也可以手工调用。
 
 `startup`、`resume`、`clear` 只注入维护策略和已有地图入口，不会因为会话启动就扫描
 仓库或写地图。Agent 在完成一段连贯的源码调查或实现后，直接使用当前会话中已经获得的
@@ -23,7 +23,7 @@ codebase-map `SessionStart` handler 会被刷新为当前安装版本。setup �
 再继续原任务。
 
 整个流程没有运行时状态；`SessionStart` 注入上下文，Agent 在检查点直接把经过源码
-复核的会话知识更新到 Markdown 地图文档。未启用 hook 时，普通会话不会加载该 skill，仍可
+复核的会话知识更新到 Markdown 地图文档。未启用 hook 时不会进入持续维护模式，仍可
 手工调用 `$codebase-map` 维护地图。
 
 ---

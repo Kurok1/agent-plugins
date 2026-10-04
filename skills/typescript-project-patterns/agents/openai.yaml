@@ -1,0 +1,4 @@
+interface:
+  display_name: "TypeScript 项目范式"
+  short_description: "按领域组织 TypeScript 单包与多包工程，维护模块职责和运行环境边界"
+  default_prompt: "使用 $typescrip-project-pattern，按当前项目的业务领域与规模整理 TypeScript 目录，检查公开入口、依赖边界和迁移后的运行时资源路径。"

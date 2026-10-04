@@ -83,7 +83,7 @@ class SetupCodebaseHookTest(unittest.TestCase):
                 handlers[0]["commandWindows"],
             )
 
-    def test_setup_preserves_other_hooks_migrates_stale_handlers_and_is_idempotent(
+    def test_setup_preserves_other_hooks_refreshes_session_start_and_is_idempotent(
         self,
     ) -> None:
         hooks_path = self.root / ".codex" / "hooks.json"
@@ -96,7 +96,7 @@ class SetupCodebaseHookTest(unittest.TestCase):
             "type": "command",
             "command": (
                 'python3 "$PLUGIN_ROOT/skills/codebase-map/scripts/codebase_map.py" '
-                "hook stop"
+                "hook session-start"
             ),
         }
         original = {
@@ -104,10 +104,11 @@ class SetupCodebaseHookTest(unittest.TestCase):
             "custom": {"keep": True},
             "hooks": {
                 "PreToolUse": [{"matcher": "Bash", "hooks": [third_party_handler]}],
-                "Stop": [
+                "SessionStart": [
                     {"matcher": "custom", "hooks": [third_party_handler, stale_handler]},
                     {"hooks": [stale_handler]},
                 ],
+                "Stop": [{"hooks": [third_party_handler]}],
             },
         }
         hooks_path.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
@@ -120,8 +121,9 @@ class SetupCodebaseHookTest(unittest.TestCase):
         self.assertEqual(payload["description"], original["description"])
         self.assertEqual(payload["custom"], original["custom"])
         self.assertEqual(payload["hooks"]["PreToolUse"], original["hooks"]["PreToolUse"])
-        self.assertEqual(payload["hooks"]["Stop"][0]["hooks"], [third_party_handler])
-        self.assertEqual(len(self._owned_handlers(payload, "Stop")), 1)
+        self.assertEqual(payload["hooks"]["Stop"], original["hooks"]["Stop"])
+        self.assertEqual(payload["hooks"]["SessionStart"][0]["hooks"], [third_party_handler])
+        self.assertEqual(len(self._owned_handlers(payload, "SessionStart")), 1)
 
         second_result = self._setup()
 

@@ -30,7 +30,9 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"Cannot load codebase-map script: {SCRIPT_PATH}")
 CODEBASE_MAP = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = CODEBASE_MAP
-SPEC.loader.exec_module(CODEBASE_MAP)
+with mock.patch.object(sys, "path", [str(SCRIPT_PATH.parent), *sys.path]):
+    SPEC.loader.exec_module(CODEBASE_MAP)
+CODEBASE_HOOK = sys.modules["codebase_hook"]
 
 
 class CodebaseMapTest(unittest.TestCase):
@@ -80,17 +82,17 @@ class CodebaseMapTest(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(
-                CODEBASE_MAP.sys,
+                CODEBASE_HOOK.sys,
                 "stdin",
                 io.StringIO(json.dumps(payload)),
             ),
             redirect_stdout(output),
         ):
-            result = CODEBASE_MAP.handle_hook(event)
+            result = CODEBASE_HOOK.handle_hook(event)
         return result, output.getvalue()
 
     def test_session_start_enables_continuous_mode_and_lists_submodule_maps(self) -> None:
-        context = CODEBASE_MAP.build_start_context(self.root, "startup")
+        context = CODEBASE_HOOK.build_start_context(self.root, "startup")
 
         self.assertIn(
             "Use $codebase-map in continuous maintenance mode",
@@ -107,14 +109,14 @@ class CodebaseMapTest(unittest.TestCase):
         index.parent.mkdir(parents=True)
         index.write_text("# Root map\n", encoding="utf-8")
 
-        context = CODEBASE_MAP.build_start_context(self.root, "resume")
+        context = CODEBASE_HOOK.build_start_context(self.root, "resume")
 
         self.assertIn("<CODEMAP>\n# Root map\n\n</CODEMAP>", context)
         self.assertIn('source="resume"', context)
 
     def test_session_start_without_a_map_still_activates_maintenance(self) -> None:
         with tempfile.TemporaryDirectory() as empty_directory:
-            context = CODEBASE_MAP.build_start_context(
+            context = CODEBASE_HOOK.build_start_context(
                 Path(empty_directory).resolve(),
                 "clear",
             )
@@ -127,7 +129,7 @@ class CodebaseMapTest(unittest.TestCase):
         self.assertIn("Do not scan the repository merely to populate the map", context)
 
     def test_compact_source_requests_an_immediate_context_checkpoint(self) -> None:
-        context = CODEBASE_MAP.build_start_context(self.root, "compact")
+        context = CODEBASE_HOOK.build_start_context(self.root, "compact")
 
         self.assertIn('source="compact"', context)
         self.assertIn("Compaction just completed", context)
@@ -158,8 +160,32 @@ class CodebaseMapTest(unittest.TestCase):
         )
 
     def test_unknown_session_start_source_is_rejected(self) -> None:
-        with self.assertRaises(CODEBASE_MAP.MapError):
-            CODEBASE_MAP.build_start_context(self.root, "unknown")
+        with self.assertRaises(CODEBASE_HOOK.MapError):
+            CODEBASE_HOOK.build_start_context(self.root, "unknown")
+
+    def test_legacy_hook_cli_delegates_to_the_standalone_runner(self) -> None:
+        payload = json.dumps(
+            {
+                "hook_event_name": "SessionStart",
+                "cwd": str(self.root),
+                "source": "compact",
+            }
+        )
+        responses = []
+        for script in (SCRIPT_PATH, SCRIPT_PATH.with_name("codebase_hook.py")):
+            completed = subprocess.run(
+                [sys.executable, "-B", str(script), "hook", "session-start"],
+                check=False,
+                input=payload,
+                capture_output=True,
+                text=True,
+                cwd=self.root,
+                timeout=5,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            responses.append(json.loads(completed.stdout))
+
+        self.assertEqual(responses[0], responses[1])
 
     def test_runner_has_no_runtime_evidence_pipeline(self) -> None:
         self.assertFalse(hasattr(CODEBASE_MAP, "ensure_pending"))

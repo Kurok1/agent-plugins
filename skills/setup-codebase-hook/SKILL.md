@@ -18,11 +18,15 @@ Enable continuous codebase-map knowledge checkpoints only for the selected proje
      --project-root <project-root>
    ```
 
-3. Read the JSON result. Report the resolved project root and `.codex/hooks.json` path. A `changed: false` result means the project already has the current `SessionStart` handler.
+3. Read the JSON result. Report the resolved project root, `.codex/hooks.json` path, and shared `script` path. `script_created` indicates whether the shared script was installed; `changed: false` means the project's hook configuration was already current.
 4. Tell the user to open `/hooks`, review and trust the project hook definition, then start a new task in that project so all lifecycle events load from the beginning.
 
-The setup command owns only the codebase-map `SessionStart` command handler. It preserves every other project hook, folds duplicate codebase-map `SessionStart` handlers into one, and refuses unsafe symlinks, invalid JSON, or a same-layer `.codex/config.toml` with inline hooks.
+The setup command owns only the codebase-map `SessionStart` command handler. For an existing handler, it updates only `command` and `commandWindows`, preserving its group, position, matcher, timeout, context limit, status message, and other fields. It preserves every other project hook, folds duplicate codebase-map `SessionStart` handlers into the first one, and refuses unsafe symlinks, invalid JSON, or a same-layer `.codex/config.toml` with inline hooks.
 
-The handler matches `startup|resume|clear|compact`. It injects continuous maintenance instructions and the available map indexes; it does not capture tool calls or create runtime evidence files. Project hooks store the absolute path of the currently installed codebase-map runner because plugin-only `PLUGIN_ROOT` variables are unavailable at the project hook layer. Re-run this skill after moving or upgrading the plugin to refresh that path.
+The handler matches `startup|resume|clear|compact`; resuming a session uses `SessionStart` with `source: resume`. It injects continuous maintenance instructions and the available map indexes; it does not capture tool calls or create runtime evidence files.
 
-Keep this workflow project-local. Write neither plugin-bundled hooks nor user-global Codex hooks.
+The setup script copies the standalone `codebase-map/scripts/codebase_hook.py` to `~/.codebase-map/codebase-hook.py` only when the destination is missing. It preserves an existing regular file and points project handlers at this shared file's absolute path. The shared directory is independent of any harness product. The installed script needs only Python's standard library and Git for Git-aware discovery; it never loads code from the plugin directory.
+
+Run this skill once in an existing project to migrate a handler that still points into a plugin installation or at the earlier `~/.codex/codebase-hook.py` location. Subsequent plugin upgrades or moves require no project hook changes. The shared script is not automatically upgraded: to replace it with the bundled version, explicitly remove or move aside `~/.codebase-map/codebase-hook.py` and run setup again for one project. All migrated projects then use the replacement at the same path.
+
+Register hooks only in the selected project's `.codex/hooks.json`. The shared executable belongs under `~/.codebase-map/`, but setup creates neither user-global hook configuration nor plugin-bundled hooks.

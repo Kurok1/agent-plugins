@@ -226,6 +226,14 @@ Lifecycle maintenance is opt-in per project. The plugin does not bundle a
 global hook. When the user wants it configured by the plugin, they explicitly
 invoke `$setup-codebase-hook` for that project.
 
+Setup installs the standalone `scripts/codebase_hook.py` as
+`~/.codebase-map/codebase-hook.py` only when that shared file is missing, then points the
+project hook at its absolute path. The installed handler has no plugin-directory
+dependency, so plugin upgrades do not require rewriting project hooks. Existing
+shared scripts are preserved. Map validation and status remain in
+`scripts/codebase_map.py`; its `hook session-start` command delegates to the
+bundled handler for compatibility with older project configurations.
+
 The configured lifecycle has one handler:
 
 - `SessionStart` matches `startup|resume|clear|compact`, injects the continuous

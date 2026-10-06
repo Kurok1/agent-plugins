@@ -20,11 +20,11 @@ from typing import Any
 
 
 INLINE_HOOKS_HEADER_RE = re.compile(r"^\s*\[\[?\s*hooks(?:\s*[.\]])", re.M)
-CODEBASE_MAP_SCRIPT = (
+CODEBASE_HOOK_SOURCE = (
     Path(__file__).resolve().parents[2]
     / "codebase-map"
     / "scripts"
-    / "codebase_map.py"
+    / "codebase_hook.py"
 )
 PROJECT_HOOK_SPECS: dict[str, dict[str, Any]] = {
     "SessionStart": {
@@ -39,6 +39,58 @@ PROJECT_HOOK_SPECS: dict[str, dict[str, Any]] = {
 
 class SetupError(RuntimeError):
     """Raised when project hooks cannot be updated safely."""
+
+
+def install_shared_hook() -> tuple[Path, bool]:
+    script_path = Path.home() / ".codebase-map" / "codebase-hook.py"
+    shared_directory = script_path.parent
+    if shared_directory.is_symlink():
+        raise SetupError(
+            f"Refusing to install through a symlinked hook directory: {shared_directory}"
+        )
+    if shared_directory.exists() and not shared_directory.is_dir():
+        raise SetupError(f"Shared hook directory is not a directory: {shared_directory}")
+    if script_path.is_symlink():
+        raise SetupError(f"Refusing to use a symlinked shared hook: {script_path}")
+    if script_path.exists():
+        if not script_path.is_file():
+            raise SetupError(f"Shared hook path is not a regular file: {script_path}")
+        return script_path, False
+
+    try:
+        content = CODEBASE_HOOK_SOURCE.read_bytes()
+    except OSError as error:
+        raise SetupError(
+            f"Cannot read the bundled codebase hook: {CODEBASE_HOOK_SOURCE}"
+        ) from error
+
+    try:
+        shared_directory.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{script_path.name}.", dir=shared_directory
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Publish a complete file without replacing a concurrent installation.
+            try:
+                os.link(temporary_path, script_path)
+            except FileExistsError:
+                if script_path.is_symlink() or not script_path.is_file():
+                    raise SetupError(
+                        f"Shared hook path is not a regular file: {script_path}"
+                    )
+                return script_path, False
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    except OSError as error:
+        raise SetupError(
+            f"Cannot install the shared codebase hook: {script_path}"
+        ) from error
+    return script_path, True
 
 
 def resolve_project_root(raw_project_root: str | Path) -> Path:
@@ -105,10 +157,20 @@ def load_project_hooks(hooks_path: Path) -> dict[str, Any]:
 def command_runs_codebase_map_hook(command: Any, hook_event: str) -> bool:
     if not isinstance(command, str):
         return False
-    normalized = command.replace("\\", "/")
-    if "skills/codebase-map/scripts/codebase_map.py" not in normalized:
+    try:
+        arguments = shlex.split(command.replace("\\", "/"))
+    except ValueError:
         return False
-    return bool(re.search(rf"\bhook\s+{re.escape(hook_event)}(?:\s|$)", normalized))
+    script_suffixes = (
+        "/skills/codebase-map/scripts/codebase_map.py",
+        "/.codex/codebase-hook.py",
+        "/.codebase-map/codebase-hook.py",
+    )
+    return any(
+        ("/" + argument).endswith(script_suffixes)
+        and arguments[index + 1 : index + 3] == ["hook", hook_event]
+        for index, argument in enumerate(arguments)
+    )
 
 
 def is_codebase_map_handler(handler: dict[str, Any], hook_event: str) -> bool:
@@ -153,20 +215,25 @@ def merge_project_hooks(
     for event_name, spec in PROJECT_HOOK_SPECS.items():
         hook_event = str(spec["hook_event"])
         matcher_groups = hooks.setdefault(event_name, [])
+        replacement_group = project_hook_group(event_name, script_path)
+        replacement_handler = replacement_group["hooks"][0]
+        found_handler = False
         retained_groups: list[dict[str, Any]] = []
         for matcher_group in matcher_groups:
-            retained_handlers = [
-                handler
-                for handler in matcher_group["hooks"]
-                if not is_codebase_map_handler(handler, hook_event)
-            ]
-            if len(retained_handlers) == len(matcher_group["hooks"]):
+            retained_handlers: list[dict[str, Any]] = []
+            for handler in matcher_group["hooks"]:
+                if not is_codebase_map_handler(handler, hook_event):
+                    retained_handlers.append(handler)
+                elif not found_handler:
+                    for key in ("command", "commandWindows"):
+                        handler[key] = replacement_handler[key]
+                    retained_handlers.append(handler)
+                    found_handler = True
+            if retained_handlers or not matcher_group["hooks"]:
+                matcher_group["hooks"] = retained_handlers
                 retained_groups.append(matcher_group)
-            elif retained_handlers:
-                retained_group = copy.deepcopy(matcher_group)
-                retained_group["hooks"] = retained_handlers
-                retained_groups.append(retained_group)
-        retained_groups.append(project_hook_group(event_name, script_path))
+        if not found_handler:
+            retained_groups.append(replacement_group)
         hooks[event_name] = retained_groups
     return updated
 
@@ -203,9 +270,7 @@ def setup_project_hooks(raw_project_root: str | Path) -> dict[str, Any]:
     project_root = resolve_project_root(raw_project_root)
     hooks_path = project_hooks_target(project_root)
     existing = load_project_hooks(hooks_path)
-    script_path = CODEBASE_MAP_SCRIPT.resolve()
-    if not script_path.is_file():
-        raise SetupError(f"Cannot locate the codebase-map runner: {script_path}")
+    script_path, script_created = install_shared_hook()
     updated = merge_project_hooks(existing, script_path, hooks_path)
     changed = updated != existing
     if changed:
@@ -219,6 +284,7 @@ def setup_project_hooks(raw_project_root: str | Path) -> dict[str, Any]:
         "project_root": str(project_root),
         "hooks_file": str(hooks_path),
         "script": str(script_path),
+        "script_created": script_created,
         "events": list(PROJECT_HOOK_SPECS),
         "maintenance_mode": "session-context-checkpoints",
     }

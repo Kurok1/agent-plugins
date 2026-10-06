@@ -8,13 +8,30 @@ $setup-codebase-hook
 
 该 skill 会将一个匹配 `startup|resume|clear|compact` 的 `SessionStart` handler
 安全合并到项目根的 `.codex/hooks.json`。已有的其他 hooks 会被保留；重复或旧版本的
-codebase-map `SessionStart` handler 会被刷新为当前安装版本。setup 脚本直接使用传入的
-项目目录，不会再根据 Git 或项目标记向上查找。
+codebase-map `SessionStart` handler 会被合并为指向共享脚本的唯一 handler。已有 handler
+只更新 `command` 和 `commandWindows`；保留第一个 handler 的分组、顺序、`matcher`、
+`timeout`、`statusMessage`、`additionalContextLimit` 等其余字段。setup 脚本直接使用
+传入的项目目录，不会再根据 Git 或项目标记向上查找。
+
+setup 会检查 `~/.codebase-map/codebase-hook.py`：文件不存在时，从插件中的
+`skills/codebase-map/scripts/codebase_hook.py` 复制独立脚本；已存在时保留原文件。
+项目 hooks 使用该共享文件的绝对路径。共享脚本只依赖 Python 标准库，并使用 Git
+识别工作树和 submodule，不会再加载插件版本目录中的代码。只有执行文件共享，hook
+仍由各项目单独启用，不会写入用户全局 hooks 配置。共享目录不绑定具体的 harness 产品。
 
 配置完成后，通过 Codex 的 `/hooks` 审查并信任项目 hook，然后在该项目中新建 task。
-项目 hooks 使用当前安装 runner 的绝对路径，因此移动或升级插件后应重新调用一次
-`$setup-codebase-hook`。`codebase-map` skill 使用默认的模型自动发现，使项目
+旧项目只需重新调用一次 `$setup-codebase-hook`，迁移原来指向插件目录或
+`~/.codex/codebase-hook.py` 的 handler。
+此后移动或升级插件无需再逐个修改项目 hooks。共享脚本本身不会自动覆盖更新；需要
+升级它时，先明确移走或删除 `~/.codebase-map/codebase-hook.py`，再在任一项目运行 setup，
+所有已迁移项目便会使用同一路径下的新脚本。地图校验和状态查询仍由插件中的
+`codebase_map.py` 提供，其旧 `hook session-start` 命令保留为兼容入口。
+
+`codebase-map` skill 使用默认的模型自动发现，使项目
 `SessionStart` hook 注入的 `$codebase-map` 能加载完整 skill 指令；用户也可以手工调用。
+
+恢复会话对应 `SessionStart` 的 `source: resume`，与 `startup|clear|compact` 共用
+同一个 handler。
 
 `startup`、`resume`、`clear` 只注入维护策略和已有地图入口，不会因为会话启动就扫描
 仓库或写地图。Agent 在完成一段连贯的源码调查或实现后，直接使用当前会话中已经获得的

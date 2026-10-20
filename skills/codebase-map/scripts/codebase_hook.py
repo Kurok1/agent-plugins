@@ -17,7 +17,12 @@ from typing import Any, TextIO
 
 MAP_RELATIVE_PATH = Path("docs") / ".codebase-map"
 MAX_START_CONTEXT_CHARACTERS = 10_000
-SESSION_START_SOURCES = {"startup", "resume", "clear", "compact"}
+SESSION_START_SOURCES = {"startup", "resume", "clear", "compact", "fork"}
+ATHENA_START_SOURCES = {
+    "SessionStarted": "startup",
+    "SessionResumed": "resume",
+    "PostCompact": "compact",
+}
 
 PROJECT_MARKERS = (
     ".git",
@@ -38,7 +43,9 @@ class MapError(RuntimeError):
     """Raised when a hook payload or Markdown map cannot be handled safely."""
 
 
-def resolve_project_root(raw_cwd: str | Path) -> Path:
+def resolve_project_root(
+    raw_cwd: str | Path, *, discover_markers: bool = True
+) -> Path:
     cwd = Path(raw_cwd).expanduser().resolve()
     if cwd.is_file():
         cwd = cwd.parent
@@ -56,9 +63,10 @@ def resolve_project_root(raw_cwd: str | Path) -> Path:
     except (FileNotFoundError, subprocess.SubprocessError):
         pass
 
-    for candidate in (cwd, *cwd.parents):
-        if any((candidate / marker).exists() for marker in PROJECT_MARKERS):
-            return candidate
+    if discover_markers:
+        for candidate in (cwd, *cwd.parents):
+            if any((candidate / marker).exists() for marker in PROJECT_MARKERS):
+                return candidate
     return cwd
 
 
@@ -226,28 +234,61 @@ def read_hook_payload(stdin: TextIO) -> dict[str, Any]:
     return payload
 
 
+def normalize_hook_input(payload: dict[str, Any]) -> tuple[str, Path, str]:
+    """Return the harness, owning project root, and checkpoint source."""
+    if "hookName" in payload or "workspace" in payload:
+        if "hook_event_name" in payload:
+            raise MapError("Hook input mixes Athena and Codex event fields")
+        actual_event = payload.get("hookName")
+        if not isinstance(actual_event, str) or actual_event not in ATHENA_START_SOURCES:
+            raise MapError(
+                "Expected Athena SessionStarted, SessionResumed, or PostCompact "
+                f"hook input, received {actual_event!r}"
+            )
+        workspace = payload.get("workspace")
+        if (
+            not isinstance(workspace, str)
+            or not workspace.strip()
+            or "\x00" in workspace
+            or not Path(workspace).is_absolute()
+            or not Path(workspace).is_dir()
+        ):
+            raise MapError("Athena workspace must be an existing absolute directory")
+        return (
+            "athena",
+            resolve_project_root(workspace, discover_markers=False),
+            ATHENA_START_SOURCES[actual_event],
+        )
+
+    actual_event = payload.get("hook_event_name")
+    if "hook_event_name" in payload and actual_event != "SessionStart":
+        raise MapError(f"Expected SessionStart hook input, received {actual_event}")
+    cwd = payload.get("cwd")
+    if cwd is not None and (not isinstance(cwd, str) or "\x00" in cwd):
+        raise MapError("Codex cwd must be a directory path string")
+    source = payload.get("source")
+    if source is None or source == "":
+        source = "startup"
+    if not isinstance(source, str) or source not in SESSION_START_SOURCES:
+        raise MapError(f"Unsupported SessionStart source: {source!r}")
+    return "codex", resolve_project_root(cwd or Path.cwd()), source
+
+
 def handle_hook(event: str) -> int:
     if event != "session-start":
         raise MapError(f"Unsupported hook event: {event}")
-    payload = read_hook_payload(sys.stdin)
-    actual_event = payload.get("hook_event_name")
-    if actual_event and actual_event != "SessionStart":
-        raise MapError(f"Expected SessionStart hook input, received {actual_event}")
-
-    project_root = resolve_project_root(payload.get("cwd") or Path.cwd())
-    source = str(payload.get("source") or "startup")
+    harness, project_root, source = normalize_hook_input(read_hook_payload(sys.stdin))
     context = build_start_context(project_root, source)
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": context,
-                }
-            },
-            ensure_ascii=False,
-        )
-    )
+    if harness == "athena":
+        response = {"additionalPrompt": context, "role": "developer"}
+    else:
+        response = {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        }
+    print(json.dumps(response, ensure_ascii=False))
     return 0
 
 
@@ -257,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     hook_parser = subparsers.add_parser(
-        "hook", help="Handle a Codex lifecycle hook on stdin"
+        "hook", help="Handle a Codex or Athena lifecycle hook on stdin"
     )
     hook_parser.add_argument("event", choices=("session-start",))
     return parser

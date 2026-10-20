@@ -9,6 +9,7 @@ import argparse
 import importlib.util
 import io
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -163,29 +164,179 @@ class CodebaseMapTest(unittest.TestCase):
         with self.assertRaises(CODEBASE_HOOK.MapError):
             CODEBASE_HOOK.build_start_context(self.root, "unknown")
 
+    def test_codex_sources_keep_the_existing_output_contract(self) -> None:
+        for source in ("startup", "resume", "clear", "compact", "fork"):
+            with self.subTest(source=source):
+                result, output = self._run_hook(
+                    "session-start",
+                    {
+                        "hook_event_name": "SessionStart",
+                        "cwd": str(self.root),
+                        "source": source,
+                    },
+                )
+                self.assertEqual(result, 0)
+                self.assertEqual(
+                    json.loads(output),
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "SessionStart",
+                            "additionalContext": CODEBASE_HOOK.build_start_context(
+                                self.root, source
+                            ),
+                        }
+                    },
+                )
+
+    def test_athena_events_emit_developer_prompts_from_the_workspace(self) -> None:
+        index = self.root / "docs" / ".codebase-map" / "CODEMAP.md"
+        index.parent.mkdir(parents=True)
+        index.write_text("# 项目地图\n", encoding="utf-8")
+        for event_name, source in (
+            ("SessionStarted", "startup"),
+            ("SessionResumed", "resume"),
+            ("PostCompact", "compact"),
+        ):
+            with self.subTest(event_name=event_name):
+                result, output = self._run_hook(
+                    "session-start",
+                    {
+                        "hookName": event_name,
+                        "workspace": str(self.root),
+                        "sessionId": "athena-session",
+                        "model": {
+                            "provider": "openai",
+                            "modelId": "test-model",
+                            "thinkingLevel": "high",
+                        },
+                        "timestamp": "2026-10-20T00:00:00.000Z",
+                        "cwd": str(self.frontend),
+                        "source": "ignored-for-athena",
+                    },
+                )
+                self.assertEqual(result, 0)
+                self.assertEqual(
+                    json.loads(output),
+                    {
+                        "additionalPrompt": CODEBASE_HOOK.build_start_context(
+                            self.root, source
+                        ),
+                        "role": "developer",
+                    },
+                )
+                self.assertIn("# 项目地图", output)
+
+    def test_athena_preserves_an_explicit_non_git_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory).resolve()
+            (parent / "package.json").write_text("{}", encoding="utf-8")
+            workspace = parent / "nested workspace"
+            workspace.mkdir()
+            for root, text in (
+                (parent, "# Parent map must not be injected\n"),
+                (workspace, "# Explicit workspace map\n"),
+            ):
+                index = root / "docs" / ".codebase-map" / "CODEMAP.md"
+                index.parent.mkdir(parents=True)
+                index.write_text(text, encoding="utf-8")
+
+            _, output = self._run_hook(
+                "session-start",
+                {"hookName": "SessionStarted", "workspace": str(workspace)},
+            )
+
+        context = json.loads(output)["additionalPrompt"]
+        self.assertIn("# Explicit workspace map", context)
+        self.assertNotIn("# Parent map must not be injected", context)
+
+    def test_athena_resolves_the_owning_git_worktree(self) -> None:
+        _, output = self._run_hook(
+            "session-start",
+            {"hookName": "SessionResumed", "workspace": str(self.frontend / "src")},
+        )
+
+        context = json.loads(output)["additionalPrompt"]
+        self.assertIn("<CODEMAP>\n# frontend\n", context)
+        self.assertNotIn("<SUBMODULE_CODEMAPS>", context)
+
+    def test_invalid_hook_inputs_fail_without_context_or_tracebacks(self) -> None:
+        payloads = [
+            "not-json",
+            "[]",
+            "null",
+            json.dumps({"hook_event_name": "Stop"}),
+            *[
+                json.dumps({"hook_event_name": "SessionStart", "source": source})
+                for source in ("unknown", [], {}, False)
+            ],
+            json.dumps({"hook_event_name": "SessionStart", "cwd": []}),
+            json.dumps({"workspace": str(self.root)}),
+            json.dumps({"hookName": ["SessionStarted"], "workspace": str(self.root)}),
+            json.dumps({"hookName": "ThreadFinished", "workspace": str(self.root)}),
+            json.dumps(
+                {
+                    "hookName": "SessionStarted",
+                    "hook_event_name": "SessionStart",
+                    "workspace": str(self.root),
+                }
+            ),
+            *[
+                json.dumps({"hookName": "SessionStarted", "workspace": workspace})
+                for workspace in (
+                    None, "", [], 42, "relative/path", "\x00",
+                    str(self.root / "missing"), str(self.root / "README.md"),
+                )
+            ],
+        ]
+        for script in (CODEBASE_HOOK, CODEBASE_MAP):
+            for payload in payloads:
+                with self.subTest(script=script.__name__, payload=payload):
+                    output = io.StringIO()
+                    errors = io.StringIO()
+                    with (
+                        mock.patch.object(sys, "stdin", io.StringIO(payload)),
+                        redirect_stdout(output),
+                        redirect_stderr(errors),
+                    ):
+                        result = script.main(["hook", "session-start"])
+                    self.assertEqual(result, 2)
+                    self.assertEqual(output.getvalue(), "")
+                    self.assertTrue(errors.getvalue().strip())
+                    self.assertNotIn("Traceback", errors.getvalue())
+
     def test_legacy_hook_cli_delegates_to_the_standalone_runner(self) -> None:
-        payload = json.dumps(
+        payloads = [
             {
                 "hook_event_name": "SessionStart",
                 "cwd": str(self.root),
                 "source": "compact",
-            }
-        )
-        responses = []
-        for script in (SCRIPT_PATH, SCRIPT_PATH.with_name("codebase_hook.py")):
-            completed = subprocess.run(
-                [sys.executable, "-B", str(script), "hook", "session-start"],
-                check=False,
-                input=payload,
-                capture_output=True,
-                text=True,
-                cwd=self.root,
-                timeout=5,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            responses.append(json.loads(completed.stdout))
+            },
+            *[
+                {"hookName": event_name, "workspace": str(self.root)}
+                for event_name in ("SessionStarted", "SessionResumed", "PostCompact")
+            ],
+        ]
+        standalone = self.root / "standalone hook" / "codebase-hook.py"
+        standalone.parent.mkdir()
+        shutil.copyfile(SCRIPT_PATH.with_name("codebase_hook.py"), standalone)
+        for payload in payloads:
+            responses = []
+            for script in (SCRIPT_PATH, SCRIPT_PATH.with_name("codebase_hook.py"), standalone):
+                with self.subTest(script=script, payload=payload):
+                    completed = subprocess.run(
+                        [sys.executable, "-B", str(script), "hook", "session-start"],
+                        check=False,
+                        input=json.dumps(payload),
+                        capture_output=True,
+                        text=True,
+                        cwd=self.backend,
+                        timeout=5,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    responses.append(json.loads(completed.stdout))
 
-        self.assertEqual(responses[0], responses[1])
+            self.assertEqual(responses[0], responses[1])
+            self.assertEqual(responses[0], responses[2])
 
     def test_runner_has_no_runtime_evidence_pipeline(self) -> None:
         self.assertFalse(hasattr(CODEBASE_MAP, "ensure_pending"))

@@ -230,7 +230,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    hook_parser = subparsers.add_parser("hook", help="Handle a Codex lifecycle hook on stdin")
+    hook_parser = subparsers.add_parser(
+        "hook", help="Handle a Codex or Athena lifecycle hook on stdin"
+    )
     hook_parser.add_argument("event", choices=("session-start",))
 
     validate_parser = subparsers.add_parser("validate", help="Validate a Markdown codebase map")

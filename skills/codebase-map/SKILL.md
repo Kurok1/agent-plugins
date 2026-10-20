@@ -15,8 +15,10 @@ Enter this workflow when the current user invokes `$codebase-map` or hook
 context contains `CODEBASE_MAP_CHECKPOINT`.
 
 - A user invocation requests a manual navigation or maintenance pass.
-- A project `SessionStart` hook enables continuous maintenance for the current
-  session. Its `source` is `startup`, `resume`, `clear`, or `compact`.
+- A project lifecycle hook enables continuous maintenance for the current
+  session. Codex uses `SessionStart`; Athena uses `SessionStarted`,
+  `SessionResumed`, or `PostCompact`. The checkpoint's normalized `source` is
+  `startup`, `resume`, `clear`, `compact`, or `fork`.
 - Ordinary sessions without that hook enter this workflow only through a user
   invocation.
 
@@ -34,12 +36,12 @@ Use a checkpoint:
 
 - after a coherent source investigation or implementation establishes durable
   navigation knowledge and before moving to an unrelated area;
-- immediately after a `SessionStart` hook with `source: compact`, before
+- immediately after a checkpoint with `source: compact`, before
   continuing the active task; and
 - before the final response when verified, map-worthy knowledge remains
   unrecorded.
 
-At `startup`, `resume`, or `clear`, activate the policy and continue the primary
+At `startup`, `resume`, `clear`, or `fork`, activate the policy and continue the primary
 task. Do not scan or write merely because the session started. At `compact`, use
 the retained compacted context, decide `UPDATE` or `NO_UPDATE`, then resume the
 same task. Batch facts by affected map document rather than updating after each
@@ -234,7 +236,7 @@ shared scripts are preserved. Map validation and status remain in
 `scripts/codebase_map.py`; its `hook session-start` command delegates to the
 bundled handler for compatibility with older project configurations.
 
-The configured lifecycle has one handler:
+The Codex setup configures one handler:
 
 - `SessionStart` matches `startup|resume|clear|compact`, injects the continuous
   maintenance instruction, includes the current worktree’s concise
@@ -243,7 +245,17 @@ The configured lifecycle has one handler:
   the immediate model continuation, which can use its retained conversation
   context directly.
 
-The lifecycle is stateless: `SessionStart` injects context and the Agent updates
+The standalone script and legacy entrypoint both accept `hook session-start`.
+They select the wire format from stdin: Codex `hook_event_name` / `cwd` produces
+`hookSpecificOutput.additionalContext`; Athena `hookName` / `workspace` produces
+`additionalPrompt` with `role: "developer"`, matching Codex's context role.
+
+For Athena, use that same command for `SessionStarted`, `SessionResumed`, and
+`PostCompact`; they map to `startup`, `resume`, and `compact`. An explicit
+non-Git `workspace` remains the map root; a Git workspace resolves to its owning
+worktree. Athena registration is separate from the Codex setup skill.
+
+The lifecycle is stateless: the hook injects context and the Agent updates
 map documents directly from verified conversation knowledge at checkpoints.
 
 ## Completion criteria

@@ -43,6 +43,33 @@ setup 会检查 `~/.codebase-map/codebase-hook.py`：文件不存在时，从插
 复核的会话知识更新到 Markdown 地图文档。未启用 hook 时不会进入持续维护模式，仍可
 手工调用 `$codebase-map` 维护地图。
 
+## Hook 脚本兼容 Codex 与 Athena
+
+`skills/codebase-map/scripts/codebase_hook.py` 根据 stdin JSON 自动识别协议。
+两端使用同一个命令，旧的 `codebase_map.py hook session-start` 入口也支持相同输入：
+
+```bash
+python3 <脚本绝对路径>/codebase_hook.py hook session-start
+```
+
+| 调用方 | 输入事件 | 项目目录字段 | 检查点 source | 成功输出 |
+| --- | --- | --- | --- | --- |
+| Codex | `hook_event_name: "SessionStart"` | `cwd` | 输入的 `source`，默认 `startup` | `hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: "..."}` |
+| Athena | `hookName: "SessionStarted"` | `workspace` | `startup` | `additionalPrompt: "...", role: "developer"` |
+| Athena | `hookName: "SessionResumed"` | `workspace` | `resume` | 同上 |
+| Athena | `hookName: "PostCompact"` | `workspace` | `compact` | 同上 |
+
+Athena 的三个事件均可配置为调用上述命令。`workspace` 必须是已存在的绝对目录；
+非 Git 项目直接使用该目录，Git 项目解析到所属 worktree 的根目录。输入同时含有
+两种协议的事件字段、事件不受支持或必需字段无效时，脚本以退出码 `2` 结束并将错误写入
+stderr，不输出上下文。它只校验生成检查点所需的字段。
+
+Athena 输出显式使用 `developer`，与 Codex `SessionStart` 的
+[`additionalContext` 注入角色](https://learn.chatgpt.com/docs/hooks#sessionstart)一致。
+Codex 脚本也接受 `source: "fork"`；现有 setup 的 matcher 仍保持原有范围。
+此处仅描述脚本协议兼容，Athena 的事件注册需在其 hook 配置中完成。
+已复制到 `~/.codebase-map/codebase-hook.py` 的旧文件需要更新为此版本才具备兼容能力。
+
 ---
 
 # 一、输出目录

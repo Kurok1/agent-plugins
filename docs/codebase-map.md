@@ -1,74 +1,55 @@
-# 启用项目级 Hooks
+# 安装插件与启用项目级 hook
 
-插件安装后不再自动注册全局 codebase-map hooks。只在需要维护地图的项目中显式调用：
+Codex 和 Antigravity 共用 `skills/` 下的六个技能，包括代码地图、hook 安装、源码讲解，以及 Go、Python 和 TypeScript 工程规范。
 
-```text
-$setup-codebase-hook
-```
+## 安装到客户端
 
-该 skill 会将一个匹配 `startup|resume|clear|compact` 的 `SessionStart` handler
-安全合并到项目根的 `.codex/hooks.json`。已有的其他 hooks 会被保留；重复或旧版本的
-codebase-map `SessionStart` handler 会被合并为指向共享脚本的唯一 handler。已有 handler
-只更新 `command` 和 `commandWindows`；保留第一个 handler 的分组、顺序、`matcher`、
-`timeout`、`statusMessage`、`additionalContextLimit` 等其余字段。setup 脚本直接使用
-传入的项目目录，不会再根据 Git 或项目标记向上查找。
+- **Codex** 从 `kurok1-agent-plugins` marketplace 安装 `agent-plugins`。
+- **Antigravity CLI** 使用 `agy plugin install https://github.com/Kurok1/agent-plugins`。从本地 checkout 安装时，在仓库根运行 `agy plugin install .`。用 `/skills` 查看技能，用 `/hooks` 查看项目事件。[插件安装说明](https://antigravity.google/docs/plugins)
+- **Antigravity App 和独立 IDE** 可将本仓库作为完整插件目录放在目标项目的 `.agents/plugins/agent-plugins/` 下，在 Customizations 中查看已加载的技能。App 的 Installed 面板也可以查看通过 CLI 安装的插件。[插件发现与管理](https://antigravity.google/docs/plugins)
 
-setup 会检查 `~/.codebase-map/codebase-hook.py`：文件不存在时，从插件中的
-`skills/codebase-map/scripts/codebase_hook.py` 复制独立脚本；已存在时保留原文件。
-项目 hooks 使用该共享文件的绝对路径。共享脚本只依赖 Python 标准库，并使用 Git
-识别工作树和 submodule，不会再加载插件版本目录中的代码。只有执行文件共享，hook
-仍由各项目单独启用，不会写入用户全局 hooks 配置。共享目录不绑定具体的 harness 产品。
+## 一次启用当前项目
 
-配置完成后，通过 Codex 的 `/hooks` 审查并信任项目 hook，然后在该项目中新建 task。
-旧项目只需重新调用一次 `$setup-codebase-hook`，迁移原来指向插件目录或
-`~/.codex/codebase-hook.py` 的 handler。
-此后移动或升级插件无需再逐个修改项目 hooks。共享脚本本身不会自动覆盖更新；需要
-升级它时，先明确移走或删除 `~/.codebase-map/codebase-hook.py`，再在任一项目运行 setup，
-所有已迁移项目便会使用同一路径下的新脚本。地图校验和状态查询仍由插件中的
-`codebase_map.py` 提供，其旧 `hook session-start` 命令保留为兼容入口。
-
-`codebase-map` skill 使用默认的模型自动发现，使项目
-`SessionStart` hook 注入的 `$codebase-map` 能加载完整 skill 指令；用户也可以手工调用。
-
-恢复会话对应 `SessionStart` 的 `source: resume`，与 `startup|clear|compact` 共用
-同一个 handler。
-
-`startup`、`resume`、`clear` 只注入维护策略和已有地图入口，不会因为会话启动就扫描
-仓库或写地图。Agent 在完成一段连贯的源码调查或实现后，直接使用当前会话中已经获得的
-知识作为候选，在自然检查点执行一次 `UPDATE` 或 `NO_UPDATE`。`compact` 会在压缩后的
-下一次模型续跑前重新注入提示，让 Agent 先用保留下来的会话上下文完成一次小检查点，
-再继续原任务。
-
-整个流程没有运行时状态；`SessionStart` 注入上下文，Agent 在检查点直接把经过源码
-复核的会话知识更新到 Markdown 地图文档。未启用 hook 时不会进入持续维护模式，仍可
-手工调用 `$codebase-map` 维护地图。
-
-## Hook 脚本兼容 Codex 与 Athena
-
-`skills/codebase-map/scripts/codebase_hook.py` 根据 stdin JSON 自动识别协议。
-两端使用同一个命令，旧的 `codebase_map.py hook session-start` 入口也支持相同输入：
+在 Codex 中调用 `$setup-codebase-hook`，或在 Antigravity 中输入 `/agent-plugins:setup-codebase-hook`。两个客户端的技能执行同一条命令。
 
 ```bash
-python3 <脚本绝对路径>/codebase_hook.py hook session-start
+python3 <skill-dir>/scripts/setup_codebase_hook.py --project-root <project-root>
 ```
 
-| 调用方 | 输入事件 | 项目目录字段 | 检查点 source | 成功输出 |
-| --- | --- | --- | --- | --- |
-| Codex | `hook_event_name: "SessionStart"` | `cwd` | 输入的 `source`，默认 `startup` | `hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: "..."}` |
-| Athena | `hookName: "SessionStarted"` | `workspace` | `startup` | `additionalPrompt: "...", role: "developer"` |
-| Athena | `hookName: "SessionResumed"` | `workspace` | `resume` | 同上 |
-| Athena | `hookName: "PostCompact"` | `workspace` | `compact` | 同上 |
+setup 直接采用指定目录，在一次运行中同时配置以下项目文件。插件安装后，可按需逐个项目启用。
 
-Athena 的三个事件均可配置为调用上述命令。`workspace` 必须是已存在的绝对目录；
-非 Git 项目直接使用该目录，Git 项目解析到所属 worktree 的根目录。输入同时含有
-两种协议的事件字段、事件不受支持或必需字段无效时，脚本以退出码 `2` 结束并将错误写入
-stderr，不输出上下文。它只校验生成检查点所需的字段。
+| 项目配置 | 注册的事件 | 会话中的作用 |
+| --- | --- | --- |
+| `.codex/hooks.json` | `SessionStart`，匹配 `startup\|resume\|clear\|compact` | 加载维护规则、根地图和已初始化子模块的索引路径。压缩后的首次续跑使用保留的上下文执行检查点。 |
+| `.agents/hooks.json` | `agent-plugins-codebase-map` 组下的 `SessionStart`、`PreInvocation` | 启动时加载地图，每次模型调用前追加一行维护提醒。 |
 
-Athena 输出显式使用 `developer`，与 Codex `SessionStart` 的
-[`additionalContext` 注入角色](https://learn.chatgpt.com/docs/hooks#sessionstart)一致。
-Codex 脚本也接受 `source: "fork"`；现有 setup 的 matcher 仍保持原有范围。
-此处仅描述脚本协议兼容，Athena 的事件注册需在其 hook 配置中完成。
-已复制到 `~/.codebase-map/codebase-hook.py` 的旧文件需要更新为此版本才具备兼容能力。
+setup 先预检两份配置，再逐文件原子写入。已有 Codex handler 只更新命令，保留首个 handler 的位置、matcher、超时和其他字段。Antigravity 在命名组内合并自己的命令，保留其他 handler、自定义字段及已有的 `enabled: false`。重复运行会跳过内容相同的文件。配置 JSON 无效、目标为不安全的符号链接或 Codex 同层配置已定义内联 hooks 时，按报错路径修正后重跑。写入中途被打断时，重跑会补齐缺失的一侧。
+
+成功输出中的 `targets.codex` 和 `targets.antigravity` 分别包含 `hooks_file`、`script`、`script_created`、`events` 和 `changed`。Antigravity 还返回命名组的 `enabled`。顶层 `changed` 表示至少一份项目配置有变化，原有顶层路径和事件字段继续描述 Codex。
+
+在 Codex 的 `/hooks` 中审查并信任项目 hook。Antigravity CLI 的 `/hooks` 和桌面客户端的 Customizations 可以查看已启用的定义。新开会话即可收到启动上下文。[Antigravity hooks 文档](https://antigravity.google/docs/hooks)
+
+## 处理器与升级
+
+两个配置都指向独立 Python 处理器的绝对路径。运行时只用 Python 标准库和本机 Git，项目可在插件移动或升级后继续使用已安装的副本。
+
+- **Codex** 使用 `~/.codebase-map/codebase-hook.py`。文件缺失时复制，已有版本或人工修改的文件原样保留。setup 会迁移旧的插件目录路径与 `~/.codex/codebase-hook.py`。要更新这个共享副本，先将旧文件移至备份路径，再运行一次 setup。
+- **Antigravity** 使用 `~/.codebase-map/handlers/<脚本 SHA-256>/codebase-hook.py`。相同内容在项目间共用。插件升级后重跑 setup，会将当前项目指向新版。项目移动或换机器后也需重跑，以更新绑定的项目和脚本路径。
+
+## Hook 协议
+
+独立处理器和旧的 `codebase_map.py` 命令入口共用以下协议。Antigravity 的注册命令额外携带 setup 绑定的 `--project-root`。
+
+| 调用方 | 事件及输入 | 检查点 | 成功输出 |
+| --- | --- | --- | --- |
+| Codex | `hook session-start`，`hook_event_name` 和 `cwd` | 输入的 `source`，默认 `startup` | `hookSpecificOutput.additionalContext` |
+| Athena | `hook session-start`，`hookName` 和绝对目录 `workspace` | `SessionStarted`、`SessionResumed`、`PostCompact` 分别对应 `startup`、`resume`、`compact` | `additionalPrompt`，角色为 `developer` |
+| Antigravity | `hook session-start`，`workspacePaths` | `startup` | `injectSteps[].systemMessage.systemMessage` |
+| Antigravity | `hook pre-invocation`，`workspacePaths` | 一行项目提醒 | 同上 |
+
+在 Antigravity 多目录会话中，处理器只为已注册且匹配的项目注入。显式非 Git 工作区以所选目录为根。Git 项目也支持从注册目录下的同一 worktree 子目录启动。其他工作区返回空 `injectSteps`。每次调用前的提醒跳过地图读取和子模块枚举，恢复或压缩后的模型调用也适用。持续维护沿用同一规则，Agent 在自然检查点根据经过验证的新知识决定 `UPDATE` 或 `NO_UPDATE`。
+
+Athena 的事件由其自身配置注册。Codex 协议还支持 `source="fork"`。手动维护地图时，Codex 使用 `$codebase-map`，Antigravity 使用 `/agent-plugins:codebase-map`。
 
 ---
 

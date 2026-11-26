@@ -259,6 +259,66 @@ class CodebaseMapTest(unittest.TestCase):
         self.assertIn("<CODEMAP>\n# frontend\n", context)
         self.assertNotIn("<SUBMODULE_CODEMAPS>", context)
 
+    def test_antigravity_matches_registered_worktree_in_a_multi_root_session(self) -> None:
+        nested = self.root / "services" / "api"
+        nested.mkdir(parents=True)
+        payload = {"workspacePaths": [str(self.backend), str(nested)]}
+        steps = CODEBASE_HOOK.antigravity_hook_response("session-start", payload, self.root)["injectSteps"]
+        context = steps[0]["systemMessage"]["systemMessage"]
+        self.assertIn("No root CODEMAP.md exists", context)
+        self.assertIn("frontend/docs/.codebase-map/CODEMAP.md", context)
+        self.assertNotIn("<CODEMAP>", context)
+
+        for paths in ([], [str(self.backend / "src")], [str(self.root / "missing")]):
+            with self.subTest(paths=paths):
+                self.assertEqual(
+                    CODEBASE_HOOK.antigravity_hook_response(
+                        "session-start", {"workspacePaths": paths}, self.root
+                    ),
+                    {"injectSteps": []},
+                )
+
+    def test_antigravity_reads_the_linked_worktrees_own_map(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory).resolve() / "linked"
+            created = subprocess.run(
+                ["git", "-C", str(self.root), "worktree", "add", "-q", str(worktree)],
+                capture_output=True, text=True,
+            )
+            if created.returncode and "not a valid object name" in created.stderr:
+                self.skipTest("This Git version requires a commit to create a linked worktree")
+            created.check_returncode()
+            index = worktree / "docs" / ".codebase-map" / "CODEMAP.md"
+            index.parent.mkdir(parents=True)
+            index.write_text("# Linked map", encoding="utf-8")
+            payload = {"workspacePaths": [str(self.root), str(index.parent)]}
+            response = CODEBASE_HOOK.antigravity_hook_response("session-start", payload, worktree)
+            self.assertIn("# Linked map", response["injectSteps"][0]["systemMessage"]["systemMessage"])
+
+    def test_pre_invocation_is_scoped_and_never_builds_map_context(self) -> None:
+        with mock.patch.object(CODEBASE_HOOK, "build_start_context", side_effect=AssertionError):
+            response = CODEBASE_HOOK.antigravity_hook_response(
+                "pre-invocation", {"workspacePaths": [str(self.backend / "src")]}, self.backend
+            )
+        message = response["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertIn(str(self.backend), message)
+        self.assertIn("CODEBASE_MAP_CHECKPOINT", message)
+        self.assertEqual(len(message.splitlines()), 1)
+        self.assertNotIn("<CODEMAP>", message)
+
+    def test_antigravity_rejects_invalid_and_unbound_payloads(self) -> None:
+        for payload, root in (
+            ({"workspacePaths": [str(self.root)]}, None),
+            ({"workspacePaths": [str(self.root)]}, Path("relative")),
+            ({}, self.root),
+            ({"workspacePaths": str(self.root)}, self.root),
+            ({"workspacePaths": [1]}, self.root),
+            ({"workspacePaths": ["relative/path"]}, self.root),
+            ({"workspacePaths": [str(self.root)], "hook_event_name": "SessionStart"}, self.root),
+        ):
+            with self.subTest(payload=payload, root=root), self.assertRaises(CODEBASE_HOOK.MapError):
+                CODEBASE_HOOK.antigravity_hook_response("session-start", payload, root)
+
     def test_invalid_hook_inputs_fail_without_context_or_tracebacks(self) -> None:
         payloads = [
             "not-json",

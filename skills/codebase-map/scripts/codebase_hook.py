@@ -141,12 +141,14 @@ def configured_submodule_roots(project_root: Path) -> list[Path]:
     return sorted(discovered, key=str)
 
 
-def build_start_context(project_root: Path, source: str = "startup") -> str:
+def build_start_context(
+    project_root: Path, source: str = "startup", *, skill_name: str = "$codebase-map"
+) -> str:
     if source not in SESSION_START_SOURCES:
         raise MapError(f"Unsupported SessionStart source: {source}")
 
     sections = [
-        "Use $codebase-map in continuous maintenance mode for this session.",
+        f"Use {skill_name} in continuous maintenance mode for this session.",
         '<CODEBASE_MAP_CHECKPOINT source="' + source + '">',
         "Use verified knowledge already present in the current conversation as candidate "
         "map knowledge. Use only the current conversation and focused source as evidence "
@@ -274,11 +276,60 @@ def normalize_hook_input(payload: dict[str, Any]) -> tuple[str, Path, str]:
     return "codex", resolve_project_root(cwd or Path.cwd()), source
 
 
-def handle_hook(event: str) -> int:
+def antigravity_hook_response(
+    event: str, payload: dict[str, Any], project_root: Path | None
+) -> dict[str, Any]:
+    if event not in ("session-start", "pre-invocation"):
+        raise MapError(f"Unsupported Antigravity hook event: {event}")
+    if project_root is None or not project_root.is_absolute():
+        raise MapError("Antigravity hooks require the absolute --project-root used at setup")
+    if any(key in payload for key in ("hook_event_name", "hookName", "workspace")):
+        raise MapError("Hook input mixes Antigravity and other event fields")
+    workspaces = payload.get("workspacePaths")
+    if not isinstance(workspaces, list):
+        raise MapError("Antigravity workspacePaths must be an array of absolute directory paths")
+
+    project = project_root.resolve()
+    candidates = []
+    for entry in workspaces:
+        if not isinstance(entry, str) or "\x00" in entry or not Path(entry).is_absolute():
+            raise MapError("Antigravity workspacePaths must contain absolute directory paths")
+        workspace = Path(entry).resolve()
+        if is_within(workspace, project) and workspace.is_dir():
+            candidates.append(workspace)
+    if not candidates:
+        return {"injectSteps": []}
+
+    owner = resolve_project_root(project, discover_markers=False)
+    # Starting in a Git subdirectory also loads ancestor hooks, up to its worktree root.
+    if project not in candidates and not any(
+        resolve_project_root(path, discover_markers=False) == owner for path in candidates
+    ):
+        return {"injectSteps": []}
+
+    location = json.dumps(str(owner), ensure_ascii=False)
+    if event == "session-start":
+        context = f"Codebase-map project: {location}\n" + build_start_context(
+            owner, skill_name="agent-plugins:codebase-map"
+        )
+    else:
+        context = (
+            f"CODEBASE_MAP_CHECKPOINT for {location}: use agent-plugins:codebase-map "
+            "to checkpoint verified navigation knowledge at natural breaks or before finishing."
+        )
+    return {"injectSteps": [{"systemMessage": {"systemMessage": context}}]}
+
+
+def handle_hook(event: str, project_root: Path | None = None) -> int:
+    payload = read_hook_payload(sys.stdin)
+    if project_root is not None or "workspacePaths" in payload or event == "pre-invocation":
+        response = antigravity_hook_response(event, payload, project_root)
+        print(json.dumps(response, ensure_ascii=False))
+        return 0
     if event != "session-start":
         raise MapError(f"Unsupported hook event: {event}")
-    harness, project_root, source = normalize_hook_input(read_hook_payload(sys.stdin))
-    context = build_start_context(project_root, source)
+    harness, owner, source = normalize_hook_input(payload)
+    context = build_start_context(owner, source)
     if harness == "athena":
         response = {"additionalPrompt": context, "role": "developer"}
     else:
@@ -292,22 +343,24 @@ def handle_hook(event: str) -> int:
     return 0
 
 
+def add_hook_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("event", choices=("session-start", "pre-invocation"))
+    parser.add_argument("--project-root", type=Path, help="Project bound to an Antigravity hook")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Inject codebase-map session checkpoints without plugin dependencies."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    hook_parser = subparsers.add_parser(
-        "hook", help="Handle a Codex or Athena lifecycle hook on stdin"
-    )
-    hook_parser.add_argument("event", choices=("session-start",))
+    add_hook_arguments(subparsers.add_parser("hook", help="Handle a lifecycle hook on stdin"))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return handle_hook(args.event)
+        return handle_hook(args.event, args.project_root)
     except MapError as error:
         print(f"codebase-hook: {error}", file=sys.stderr)
         return 2

@@ -18,6 +18,7 @@ from urllib.parse import unquote
 from codebase_hook import (
     MAX_START_CONTEXT_CHARACTERS,
     MapError,
+    add_hook_arguments,
     handle_hook,
     is_within,
     map_root,
@@ -230,10 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    hook_parser = subparsers.add_parser(
-        "hook", help="Handle a Codex or Athena lifecycle hook on stdin"
-    )
-    hook_parser.add_argument("event", choices=("session-start",))
+    add_hook_arguments(subparsers.add_parser("hook", help="Handle a lifecycle hook on stdin"))
 
     validate_parser = subparsers.add_parser("validate", help="Validate a Markdown codebase map")
     validate_parser.add_argument("--project-root", default=".")
@@ -248,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "hook":
-            return handle_hook(args.event)
+            return handle_hook(args.event, args.project_root)
         if args.command == "validate":
             project_root = resolve_project_root(args.project_root)
             result = validate_map(project_root)

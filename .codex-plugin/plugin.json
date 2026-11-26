@@ -1,7 +1,7 @@
 {
   "name": "agent-plugins",
-  "version": "1.5.1",
-  "description": "Opt-in codebase maps and interactive source-code learning for Codex sessions",
+  "version": "1.6.0",
+  "description": "Opt-in codebase maps and interactive source-code learning for Codex and Antigravity",
   "author": {
     "name": "Kurok1",
     "email": "im.kurokyhanc@gmail.com"

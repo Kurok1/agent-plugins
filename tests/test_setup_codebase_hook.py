@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -188,19 +189,16 @@ class SetupCodebaseHookTest(unittest.TestCase):
         self.assertEqual(json.loads(hooks_path.read_text(encoding="utf-8")), expected)
         self.assertFalse(self._setup()["changed"])
 
-    def test_setup_reuses_existing_script_without_reading_or_overwriting_it(
-        self,
-    ) -> None:
+    def test_setup_preserves_existing_codex_script_and_installs_antigravity_alongside(self) -> None:
         self.shared_hook.parent.mkdir()
         content = b"# Locally maintained hook\n"
         self.shared_hook.write_bytes(content)
         before = self.shared_hook.stat().st_mtime_ns
 
-        with mock.patch.object(SETUP, "CODEBASE_HOOK_SOURCE", self.root / "missing.py"):
-            first_result = self._setup()
-            hooks_path = Path(first_result["hooks_file"])
-            hooks_before = hooks_path.stat().st_mtime_ns
-            second_result = self._setup()
+        first_result = self._setup()
+        hooks_path = Path(first_result["hooks_file"])
+        hooks_before = hooks_path.stat().st_mtime_ns
+        second_result = self._setup()
 
         self.assertFalse(first_result["script_created"])
         self.assertFalse(second_result["script_created"])
@@ -208,6 +206,11 @@ class SetupCodebaseHookTest(unittest.TestCase):
         self.assertEqual(self.shared_hook.read_bytes(), content)
         self.assertEqual(self.shared_hook.stat().st_mtime_ns, before)
         self.assertEqual(hooks_path.stat().st_mtime_ns, hooks_before)
+        antigravity = first_result["targets"]["antigravity"]
+        self.assertTrue(antigravity["script_created"])
+        bundled = SETUP.CODEBASE_HOOK_SOURCE.read_bytes()
+        self.assertEqual(Path(antigravity["script"]).parent.name, hashlib.sha256(bundled).hexdigest())
+        self.assertEqual(Path(antigravity["script"]).read_bytes(), bundled)
 
     def test_installed_hook_survives_plugin_relocation_and_is_shared_between_projects(
         self,
@@ -221,12 +224,17 @@ class SetupCodebaseHookTest(unittest.TestCase):
             hooks_path = Path(first_result["hooks_file"])
             hooks_before = hooks_path.read_bytes()
             script_before = self.shared_hook.stat().st_mtime_ns
-            plugin_directory.rename(self.root / "plugin version 2")
-            second_project = self.root / "second project"
-            second_project.mkdir()
+        relocated = plugin_directory.rename(self.root / "plugin version 2")
+        second_project = self.root / "second project"
+        second_project.mkdir()
+        with mock.patch.object(SETUP, "CODEBASE_HOOK_SOURCE", relocated / bundled_hook.name):
             second_result = self._setup(second_project)
 
         self.assertEqual(first_result["script"], second_result["script"])
+        self.assertEqual(
+            first_result["targets"]["antigravity"]["script"],
+            second_result["targets"]["antigravity"]["script"],
+        )
         self.assertFalse(second_result["script_created"])
         self.assertEqual(self.shared_hook.stat().st_mtime_ns, script_before)
         self.assertEqual(hooks_path.read_bytes(), hooks_before)
@@ -274,7 +282,7 @@ class SetupCodebaseHookTest(unittest.TestCase):
         content = b"# Installed concurrently\n"
 
         def install_concurrently(source: Path, destination: Path) -> None:
-            destination.write_bytes(content)
+            destination.write_bytes(content if destination == self.shared_hook else source.read_bytes())
             raise FileExistsError(str(destination))
 
         with mock.patch.object(SETUP.os, "link", side_effect=install_concurrently):
@@ -282,7 +290,10 @@ class SetupCodebaseHookTest(unittest.TestCase):
 
         self.assertFalse(result["script_created"])
         self.assertEqual(self.shared_hook.read_bytes(), content)
-        self.assertEqual(list(self.shared_hook.parent.iterdir()), [self.shared_hook])
+        self.assertFalse(result["targets"]["antigravity"]["script_created"])
+        self.assertCountEqual(
+            self.shared_hook.parent.iterdir(), [self.shared_hook, self.shared_hook.parent / "handlers"]
+        )
 
     def test_setup_cleans_up_failed_shared_hook_installation(self) -> None:
         with (
@@ -365,6 +376,174 @@ class SetupCodebaseHookTest(unittest.TestCase):
         plugin_root = SCRIPT_PATH.parents[3]
 
         self.assertFalse((plugin_root / "hooks" / "hooks.json").exists())
+        self.assertFalse((plugin_root / "hooks.json").exists())
+        manifests = [
+            json.loads((plugin_root / folder / "plugin.json").read_text(encoding="utf-8"))
+            for folder in (".codex-plugin", ".antigravity-plugin")
+        ]
+        for field in ("name", "version"):
+            self.assertEqual(manifests[0][field], manifests[1][field])
+
+    def test_generated_antigravity_commands_run_from_another_directory(self) -> None:
+        project = self.root / "project's space"
+        project.mkdir()
+        index = project / "docs" / ".codebase-map" / "CODEMAP.md"
+        index.parent.mkdir(parents=True)
+        index.write_text("# Real fixture map\n", encoding="utf-8")
+        target = self._setup(project)["targets"]["antigravity"]
+        path = Path(target["hooks_file"])
+        self.assertEqual(path, project / ".agents" / "hooks.json")
+        group = json.loads(path.read_bytes())[SETUP.ANTIGRAVITY_GROUP]
+        self.assertEqual(set(group), {"SessionStart", "PreInvocation"})
+        for event, handlers in group.items():
+            self.assertEqual(len(handlers), 1)
+            command = handlers[0]["command"]
+            for paths in ([str(self.user_home), str(project)], [str(self.user_home)]):
+                with self.subTest(event=event, paths=paths):
+                    process = subprocess.run(
+                        command, shell=True, cwd=self.user_home,
+                        input=json.dumps({"workspacePaths": paths, "conversationId": "fixture"}),
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    self.assertEqual(process.returncode, 0, process.stderr)
+                    steps = json.loads(process.stdout)["injectSteps"]
+                    if str(project) not in paths:
+                        self.assertEqual(steps, [])
+                        continue
+                    self.assertEqual(len(steps), 1)
+                    message = steps[0]["systemMessage"]["systemMessage"]
+                    self.assertIn("agent-plugins:codebase-map", message)
+                    self.assertEqual("# Real fixture map" in message, event == "SessionStart")
+                    self.assertEqual(
+                        '<CODEBASE_MAP_CHECKPOINT source="startup">' in message, event == "SessionStart"
+                    )
+
+    def test_refreshes_antigravity_after_upgrade_and_keeps_custom_handlers(self) -> None:
+        first = self._setup()["targets"]["antigravity"]
+        path = Path(first["hooks_file"])
+        payload = json.loads(path.read_bytes())
+        other_group = {
+            "Stop": [{"type": "command", "command": "echo other"}],
+            "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "prompt", "prompt": "Review"}]}],
+        }
+        payload["other"] = other_group
+        group = payload[SETUP.ANTIGRAVITY_GROUP]
+        group["enabled"] = False
+        group["custom"] = 5
+        other_hook = {"command": "echo user"}
+        for event in SETUP.ANTIGRAVITY_EVENTS:
+            managed = group[event][0]
+            managed.pop("type")
+            managed["timeout"] = 19
+            group[event] = [other_hook, managed, managed]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        newer = self.root / "updated.py"
+        newer.write_bytes(SETUP.CODEBASE_HOOK_SOURCE.read_bytes() + b"\n")
+        with mock.patch.object(SETUP, "CODEBASE_HOOK_SOURCE", newer):
+            result = self._setup()
+            first_mtime = path.stat().st_mtime_ns
+            self.assertFalse(self._setup()["changed"])
+            self.assertEqual(path.stat().st_mtime_ns, first_mtime)
+        target = result["targets"]["antigravity"]
+        self.assertTrue(target["changed"])
+        self.assertFalse(target["enabled"])
+        self.assertFalse(result["targets"]["codex"]["changed"])
+        self.assertNotEqual(target["script"], first["script"])
+        self.assertTrue(Path(first["script"]).is_file())
+        updated = json.loads(path.read_bytes())
+        self.assertEqual(updated["other"], other_group)
+        group = updated[SETUP.ANTIGRAVITY_GROUP]
+        self.assertFalse(group["enabled"])
+        self.assertEqual(group["custom"], 5)
+        for event in SETUP.ANTIGRAVITY_EVENTS:
+            unrelated, managed = group[event]
+            self.assertEqual(unrelated, other_hook)
+            self.assertEqual(managed["timeout"], 19)
+            self.assertIn(target["script"], managed["command"])
+
+    def test_either_target_can_be_added_without_rewriting_the_other(self) -> None:
+        targets = self._setup()["targets"]
+        for missing, present in (("codex", "antigravity"), ("antigravity", "codex")):
+            with self.subTest(missing=missing):
+                Path(targets[missing]["hooks_file"]).unlink()
+                kept = Path(targets[present]["hooks_file"])
+                modified = kept.stat().st_mtime_ns
+                result = self._setup()
+                self.assertTrue(result["changed"])
+                self.assertTrue(result["targets"][missing]["changed"])
+                self.assertFalse(result["targets"][present]["changed"])
+                self.assertEqual(kept.stat().st_mtime_ns, modified)
+
+    def test_antigravity_only_refreshes_its_own_command_on_either_platform(self) -> None:
+        digest = "a" * 64
+        script = rf"C:\Users\O'Brien\.codebase-map\handlers\{digest}\codebase-hook.py"
+        command = subprocess.list2cmdline(
+            ["py", "-3", script, "hook", "session-start", "--project-root", r"C:\My project"]
+        )
+        matches = SETUP.command_runs_codebase_map_hook
+        self.assertTrue(matches(command, "session-start", antigravity=True))
+        self.assertFalse(matches(command + " && echo done", "session-start", antigravity=True))
+        self.assertFalse(matches("echo " + command, "session-start", antigravity=True))
+
+    def test_invalid_antigravity_config_leaves_both_targets_untouched(self) -> None:
+        path = self.root / ".agents" / "hooks.json"
+        path.parent.mkdir()
+        for data in (
+            "{", "[]", json.dumps({SETUP.ANTIGRAVITY_GROUP: {"SessionStart": {}}}),
+            json.dumps({"other": "invalid group"}),
+            json.dumps({"other": {"SessionStart": [{"hooks": []}]}}),
+            json.dumps({"other": {"PreToolUse": "invalid groups"}}),
+        ):
+            path.write_text(data, encoding="utf-8")
+            with self.subTest(data=data), self.assertRaisesRegex(SETUP.SetupError, "hooks.json"):
+                self._setup()
+            self.assertEqual(path.read_text(encoding="utf-8"), data)
+            self.assertFalse((self.root / ".codex").exists())
+            self.assertFalse(self.shared_hook.exists())
+
+    def test_retry_completes_an_interrupted_second_write(self) -> None:
+        write = SETUP.atomic_write_json
+
+        def fail_second(path: Path, payload: dict) -> None:
+            if path.parent.name == ".agents":
+                raise PermissionError("simulated write failure")
+            write(path, payload)
+
+        with mock.patch.object(SETUP, "atomic_write_json", side_effect=fail_second):
+            with self.assertRaisesRegex(SETUP.SetupError, "hooks.json"):
+                self._setup()
+        result = self._setup()
+        self.assertTrue(result["configured"])
+        self.assertFalse(result["targets"]["codex"]["changed"])
+        self.assertTrue(result["targets"]["antigravity"]["changed"])
+
+    def test_modified_content_addressed_copy_is_preserved_and_reported(self) -> None:
+        target = self._setup()["targets"]["antigravity"]
+        script = Path(target["script"])
+        script.write_bytes(b"# Locally modified\n")
+        project = self.root / "another project"
+        project.mkdir()
+        with self.assertRaisesRegex(SETUP.SetupError, "content digest"):
+            self._setup(project)
+        self.assertEqual(script.read_bytes(), b"# Locally modified\n")
+        self.assertEqual(list(project.iterdir()), [])
+
+    @unittest.skipIf(os.name == "nt", "symlink creation may require elevated privileges")
+    def test_rejects_symlinked_antigravity_targets(self) -> None:
+        external = self.root / "external"
+        external.mkdir()
+        config = self.root / ".agents"
+        config.symlink_to(external, target_is_directory=True)
+        with self.assertRaises(SETUP.SetupError):
+            self._setup()
+        self.assertFalse((external / "hooks.json").exists())
+        config.unlink()
+        self.shared_hook.parent.mkdir()
+        (self.shared_hook.parent / "handlers").symlink_to(external, target_is_directory=True)
+        with self.assertRaises(SETUP.SetupError):
+            self._setup()
+        self.assertFalse((self.root / ".codex").exists())
+        self.assertEqual(list(external.iterdir()), [])
 
 
 if __name__ == "__main__":

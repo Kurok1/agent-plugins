@@ -1,6 +1,6 @@
 ---
 name: codebase-map
-description: Maintain or navigate an incremental Markdown codebase map when the user invokes $codebase-map or hook context contains a CODEBASE_MAP_CHECKPOINT for continuous maintenance.
+description: Maintain or navigate an incremental Markdown codebase map when the user invokes the codebase-map skill or a project hook supplies CODEBASE_MAP_CHECKPOINT for continuous maintenance.
 ---
 
 # Codebase Map
@@ -11,14 +11,15 @@ without scanning the repository again.
 
 ## Recognize the invocation mode
 
-Enter this workflow when the current user invokes `$codebase-map` or hook
-context contains `CODEBASE_MAP_CHECKPOINT`.
+Enter this workflow when the user invokes the codebase-map skill or hook context
+contains `CODEBASE_MAP_CHECKPOINT`. Invoke `$codebase-map` in Codex or
+`/agent-plugins:codebase-map` in Antigravity.
 
 - A user invocation requests a manual navigation or maintenance pass.
 - A project lifecycle hook enables continuous maintenance for the current
-  session. Codex uses `SessionStart`; Athena uses `SessionStarted`,
-  `SessionResumed`, or `PostCompact`. The checkpoint's normalized `source` is
-  `startup`, `resume`, `clear`, `compact`, or `fork`.
+  session. Codex uses `SessionStart`. Athena uses `SessionStarted`,
+  `SessionResumed` or `PostCompact`. Antigravity uses `SessionStart` for
+  startup context and `PreInvocation` for a short project-scoped reminder.
 - Ordinary sessions without that hook enter this workflow only through a user
   invocation.
 
@@ -224,39 +225,21 @@ python3 <skill-dir>/scripts/codebase_map.py status \
 
 ## Understand the lifecycle hook
 
-Lifecycle maintenance is opt-in per project. The plugin does not bundle a
-global hook. When the user wants it configured by the plugin, they explicitly
-invoke `$setup-codebase-hook` for that project.
+Invoke the setup-codebase-hook skill once to enable both clients in the
+selected project. Their standalone handlers inject context. The agent decides
+when verified knowledge warrants a map update.
 
-Setup installs the standalone `scripts/codebase_hook.py` as
-`~/.codebase-map/codebase-hook.py` only when that shared file is missing, then points the
-project hook at its absolute path. The installed handler has no plugin-directory
-dependency, so plugin upgrades do not require rewriting project hooks. Existing
-shared scripts are preserved. Map validation and status remain in
-`scripts/codebase_map.py`; its `hook session-start` command delegates to the
-bundled handler for compatibility with older project configurations.
-
-The Codex setup configures one handler:
-
-- `SessionStart` matches `startup|resume|clear|compact`, injects the continuous
-  maintenance instruction, includes the current worktree’s concise
-  `CODEMAP.md`, and lists initialized submodule map indexes.
-- After root-session compaction, `source: compact` delivers the checkpoint to
-  the immediate model continuation, which can use its retained conversation
-  context directly.
-
-The standalone script and legacy entrypoint both accept `hook session-start`.
-They select the wire format from stdin: Codex `hook_event_name` / `cwd` produces
-`hookSpecificOutput.additionalContext`; Athena `hookName` / `workspace` produces
-`additionalPrompt` with `role: "developer"`, matching Codex's context role.
-
-For Athena, use that same command for `SessionStarted`, `SessionResumed`, and
-`PostCompact`; they map to `startup`, `resume`, and `compact`. An explicit
-non-Git `workspace` remains the map root; a Git workspace resolves to its owning
-worktree. Athena registration is separate from the Codex setup skill.
-
-The lifecycle is stateless: the hook injects context and the Agent updates
-map documents directly from verified conversation knowledge at checkpoints.
+- **Codex** loads the maintenance policy, the root map index and initialized
+  submodule index paths on `SessionStart` for `startup|resume|clear|compact`.
+  A `compact` checkpoint applies to the immediate continuation.
+- **Antigravity** loads the same navigation context on `SessionStart` in a
+  system message naming the map owner. Each `PreInvocation` supplies a
+  one-line reminder for that project. Apply the normal knowledge checkpoint
+  criteria. Resume and compaction can be followed by an ordinary reminder.
+- **Athena** uses its own event registration. The standalone and legacy
+  `codebase_map.py hook session-start` commands accept `SessionStarted`,
+  `SessionResumed` and `PostCompact` with an absolute `workspace`. They return
+  `additionalPrompt` with role `developer` for `startup`, `resume` and `compact`.
 
 ## Completion criteria
 

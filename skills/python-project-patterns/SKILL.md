@@ -5,7 +5,7 @@ metadata:
   short-description: Python 项目标准工程化规范（结构/入口/依赖）
 ---
 
-# Python 项目工程化规范（Codex Skill）
+# Python 项目工程化规范
 
 ## 目标
 为Python 项目提供接近 Java 工程化体验的标准：可复用包结构、明确入口、可锁定依赖。

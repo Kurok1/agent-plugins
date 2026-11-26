@@ -1,0 +1,10 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "agent-plugins",
+  "displayName": "Agent Plugins",
+  "version": "1.6.0",
+  "description": "Maintain project codebase maps, learn source flows through interactive lessons, and apply Go, Python, and TypeScript project conventions.",
+  "author": { "name": "Kurok1" },
+  "repository": "https://github.com/Kurok1/agent-plugins",
+  "license": "Apache-2.0"
+}

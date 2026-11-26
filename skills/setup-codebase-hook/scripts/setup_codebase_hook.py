@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -35,39 +36,41 @@ PROJECT_HOOK_SPECS: dict[str, dict[str, Any]] = {
         "additionalContextLimit": 3500,
     },
 }
+ANTIGRAVITY_GROUP = "agent-plugins-codebase-map"
+ANTIGRAVITY_EVENTS = {"SessionStart": "session-start", "PreInvocation": "pre-invocation"}
+VERSIONED_HOOK_RE = re.compile(r"/\.codebase-map/handlers/[0-9a-f]{64}/codebase-hook\.py$")
 
 
 class SetupError(RuntimeError):
     """Raised when project hooks cannot be updated safely."""
 
 
-def install_shared_hook() -> tuple[Path, bool]:
-    script_path = Path.home() / ".codebase-map" / "codebase-hook.py"
-    shared_directory = script_path.parent
-    if shared_directory.is_symlink():
-        raise SetupError(
-            f"Refusing to install through a symlinked hook directory: {shared_directory}"
-        )
-    if shared_directory.exists() and not shared_directory.is_dir():
-        raise SetupError(f"Shared hook directory is not a directory: {shared_directory}")
+def existing_hook_copy(script_path: Path, expected: bytes | None) -> bool:
     if script_path.is_symlink():
         raise SetupError(f"Refusing to use a symlinked shared hook: {script_path}")
-    if script_path.exists():
-        if not script_path.is_file():
-            raise SetupError(f"Shared hook path is not a regular file: {script_path}")
-        return script_path, False
+    if not script_path.exists():
+        return False
+    if not script_path.is_file():
+        raise SetupError(f"Shared hook path is not a regular file: {script_path}")
+    if expected is not None and script_path.read_bytes() != expected:
+        raise SetupError(f"Installed hook does not match its content digest: {script_path}")
+    return True
 
-    try:
-        content = CODEBASE_HOOK_SOURCE.read_bytes()
-    except OSError as error:
-        raise SetupError(
-            f"Cannot read the bundled codebase hook: {CODEBASE_HOOK_SOURCE}"
-        ) from error
 
+def install_hook_copy(script_path: Path, content: bytes, *, versioned: bool = False) -> bool:
+    directory = Path.home()
+    for component in script_path.parent.relative_to(directory).parts:
+        directory /= component
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise SetupError(f"Expected a regular shared hook directory: {directory}")
+
+    expected = content if versioned else None
     try:
-        shared_directory.mkdir(parents=True, exist_ok=True)
+        if existing_hook_copy(script_path, expected):
+            return False
+        directory.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{script_path.name}.", dir=shared_directory
+            prefix=f".{script_path.name}.", dir=directory
         )
         temporary_path = Path(temporary_name)
         try:
@@ -79,18 +82,16 @@ def install_shared_hook() -> tuple[Path, bool]:
             try:
                 os.link(temporary_path, script_path)
             except FileExistsError:
-                if script_path.is_symlink() or not script_path.is_file():
-                    raise SetupError(
-                        f"Shared hook path is not a regular file: {script_path}"
-                    )
-                return script_path, False
+                if existing_hook_copy(script_path, expected):
+                    return False
+                raise
         finally:
             temporary_path.unlink(missing_ok=True)
     except OSError as error:
         raise SetupError(
             f"Cannot install the shared codebase hook: {script_path}"
         ) from error
-    return script_path, True
+    return True
 
 
 def resolve_project_root(raw_project_root: str | Path) -> Path:
@@ -150,17 +151,32 @@ def load_project_hooks(hooks_path: Path) -> dict[str, Any]:
         ) from error
     if not isinstance(payload, dict):
         raise SetupError(f"Project hooks must contain one JSON object: {hooks_path}")
-    validate_hooks_object(payload.get("hooks", {}), hooks_path)
     return payload
 
 
-def command_runs_codebase_map_hook(command: Any, hook_event: str) -> bool:
+def command_runs_codebase_map_hook(
+    command: Any, hook_event: str, *, antigravity: bool = False
+) -> bool:
     if not isinstance(command, str):
         return False
+    normalized = command.replace("\\", "/")
     try:
-        arguments = shlex.split(command.replace("\\", "/"))
+        if normalized.startswith("py -3 "):
+            # The Windows launcher uses double quotes. An apostrophe is part of the path.
+            arguments = [arg.strip('"') for arg in shlex.split(normalized, posix=False)]
+        else:
+            arguments = shlex.split(normalized)
     except ValueError:
         return False
+    if antigravity:
+        if arguments[:2] == ["py", "-3"]:
+            arguments = ["python3", *arguments[2:]]
+        return (
+            len(arguments) == 6
+            and arguments[0] == "python3"
+            and VERSIONED_HOOK_RE.search(arguments[1]) is not None
+            and arguments[2:5] == ["hook", hook_event, "--project-root"]
+        )
     script_suffixes = (
         "/skills/codebase-map/scripts/codebase_map.py",
         "/.codex/codebase-hook.py",
@@ -238,19 +254,95 @@ def merge_project_hooks(
     return updated
 
 
-def project_hooks_target(project_root: Path) -> Path:
-    codex_directory = project_root / ".codex"
-    hooks_path = codex_directory / "hooks.json"
-    config_path = codex_directory / "config.toml"
+def validate_antigravity_handlers(handlers: Any, location: str) -> None:
+    if not isinstance(handlers, list):
+        raise SetupError(f"Expected an array of Antigravity handlers at {location}")
+    for handler in handlers:
+        if not isinstance(handler, dict):
+            raise SetupError(f"Expected a hook handler object at {location}")
+        kind = handler.get("type")
+        if kind in (None, ""):
+            kind = "command"
+        if kind not in ("command", "prompt"):
+            raise SetupError(f"Unsupported Antigravity handler type at {location}: {kind!r}")
+        value = handler.get(kind)
+        if not isinstance(value, str) or not value.strip():
+            raise SetupError(f"Expected a non-empty {kind} at {location}")
+        timeout = handler.get("timeout")
+        if timeout is not None and (type(timeout) is not int or not -(2**31) <= timeout < 2**31):
+            raise SetupError(f"Expected a 32-bit integer timeout at {location}")
 
-    if codex_directory.is_symlink():
-        raise SetupError(f"Refusing to write through a symlinked config: {codex_directory}")
-    if codex_directory.exists() and not codex_directory.is_dir():
-        raise SetupError(f"Project config path is not a directory: {codex_directory}")
+
+def validate_antigravity_hooks(payload: dict[str, Any], path: Path) -> None:
+    # Antigravity skips the whole file when another named group cannot be loaded.
+    for name, group in payload.items():
+        if group is None:
+            continue
+        if not isinstance(group, dict) or not isinstance(group.get("enabled"), (bool, type(None))):
+            raise SetupError(f"Invalid Antigravity hook group {name}: {path}")
+        for event, entries in group.items():
+            if entries is None:
+                continue
+            location = f"{path} ({name}.{event})"
+            if event in (*ANTIGRAVITY_EVENTS, "PostInvocation", "Stop"):
+                validate_antigravity_handlers(entries, location)
+            elif event in ("PreToolUse", "PostToolUse"):
+                if not isinstance(entries, list):
+                    raise SetupError(f"Expected an array of matcher groups at {location}")
+                for entry in entries:
+                    if not isinstance(entry, dict) or not isinstance(
+                        entry.get("matcher"), (str, type(None))
+                    ):
+                        raise SetupError(f"Invalid matcher group at {location}")
+                    if entry.get("hooks") is not None:
+                        validate_antigravity_handlers(entry["hooks"], location)
+
+
+def merge_antigravity_hooks(
+    payload: dict[str, Any], script_path: Path, project_root: Path, hooks_path: Path
+) -> dict[str, Any]:
+    validate_antigravity_hooks(payload, hooks_path)
+    updated = copy.deepcopy(payload)
+    if updated.get(ANTIGRAVITY_GROUP) is None:
+        updated[ANTIGRAVITY_GROUP] = {}
+    group = updated[ANTIGRAVITY_GROUP]
+    for event, hook_event in ANTIGRAVITY_EVENTS.items():
+        args = [str(script_path), "hook", hook_event, "--project-root", str(project_root)]
+        if os.name == "nt":
+            command = subprocess.list2cmdline(["py", "-3", *args])
+        else:
+            command = shlex.join(["python3", *args])
+        retained = []
+        found = False
+        for handler in group.get(event) or []:
+            if handler.get("type") in (None, "", "command") and command_runs_codebase_map_hook(
+                handler.get("command"), hook_event, antigravity=True
+            ):
+                if found:
+                    continue
+                handler["command"] = command
+                found = True
+            retained.append(handler)
+        if not found:
+            retained.append({"type": "command", "command": command, "timeout": 3})
+        group[event] = retained
+    return updated
+
+
+def project_hooks_target(config_directory: Path) -> Path:
+    hooks_path = config_directory / "hooks.json"
+    if config_directory.is_symlink():
+        raise SetupError(f"Refusing to write through a symlinked config: {config_directory}")
+    if config_directory.exists() and not config_directory.is_dir():
+        raise SetupError(f"Project config path is not a directory: {config_directory}")
     if hooks_path.is_symlink():
         raise SetupError(f"Refusing to overwrite a symlinked hooks file: {hooks_path}")
     if hooks_path.exists() and not hooks_path.is_file():
         raise SetupError(f"Project hooks path is not a regular file: {hooks_path}")
+    return hooks_path
+
+
+def check_inline_codex_hooks(config_path: Path) -> None:
     if config_path.is_symlink():
         raise SetupError(f"Refusing to inspect a symlinked project config: {config_path}")
     if config_path.exists():
@@ -261,31 +353,76 @@ def project_hooks_target(project_root: Path) -> Path:
         if INLINE_HOOKS_HEADER_RE.search(config_text):
             raise SetupError(
                 "Project config already defines inline hooks. Keep one hook representation in "
-                f"this layer before creating {hooks_path}."
+                f"this layer before creating {config_path.with_name('hooks.json')}."
             )
-    return hooks_path
+
+
+def write_project_hooks(
+    path: Path, existing: dict[str, Any], updated: dict[str, Any]
+) -> bool:
+    try:
+        current = load_project_hooks(project_hooks_target(path.parent))
+        if current == updated:
+            return False
+        if current != existing:
+            raise SetupError(f"Project hooks changed during setup: {path}. Run setup again.")
+        atomic_write_json(path, updated)
+    except OSError as error:
+        raise SetupError(f"Cannot write project hooks: {path} ({error}). Run setup again.") from error
+    return True
 
 
 def setup_project_hooks(raw_project_root: str | Path) -> dict[str, Any]:
     project_root = resolve_project_root(raw_project_root)
-    hooks_path = project_hooks_target(project_root)
-    existing = load_project_hooks(hooks_path)
-    script_path, script_created = install_shared_hook()
-    updated = merge_project_hooks(existing, script_path, hooks_path)
-    changed = updated != existing
-    if changed:
-        try:
-            atomic_write_json(hooks_path, updated)
-        except OSError as error:
-            raise SetupError(f"Cannot write project hooks: {hooks_path}") from error
-    return {
-        "configured": True,
-        "changed": changed,
-        "project_root": str(project_root),
-        "hooks_file": str(hooks_path),
-        "script": str(script_path),
-        "script_created": script_created,
+    codex_path = project_hooks_target(project_root / ".codex")
+    antigravity_path = project_hooks_target(project_root / ".agents")
+    check_inline_codex_hooks(codex_path.with_name("config.toml"))
+    codex_existing = load_project_hooks(codex_path)
+    antigravity_existing = load_project_hooks(antigravity_path)
+
+    try:
+        content = CODEBASE_HOOK_SOURCE.read_bytes()
+    except OSError as error:
+        raise SetupError(f"Cannot read the bundled codebase hook: {CODEBASE_HOOK_SOURCE}") from error
+    shared = Path.home() / ".codebase-map"
+    codex_script = shared / "codebase-hook.py"
+    digest = hashlib.sha256(content).hexdigest()
+    antigravity_script = shared / "handlers" / digest / "codebase-hook.py"
+    codex_updated = merge_project_hooks(codex_existing, codex_script, codex_path)
+    antigravity_updated = merge_antigravity_hooks(
+        antigravity_existing, antigravity_script, project_root, antigravity_path
+    )
+
+    codex_created = install_hook_copy(codex_script, content)
+    antigravity_created = install_hook_copy(antigravity_script, content, versioned=True)
+    codex_changed = write_project_hooks(codex_path, codex_existing, codex_updated)
+    try:
+        antigravity_changed = write_project_hooks(
+            antigravity_path, antigravity_existing, antigravity_updated
+        )
+    except SetupError as error:
+        raise SetupError(f"{error} Codex configuration is ready at {codex_path}.") from error
+    codex = {
+        "hooks_file": str(codex_path),
+        "script": str(codex_script),
+        "script_created": codex_created,
         "events": list(PROJECT_HOOK_SPECS),
+        "changed": codex_changed,
+    }
+    antigravity = {
+        "hooks_file": str(antigravity_path),
+        "script": str(antigravity_script),
+        "script_created": antigravity_created,
+        "events": list(ANTIGRAVITY_EVENTS),
+        "enabled": antigravity_updated[ANTIGRAVITY_GROUP].get("enabled") is not False,
+        "changed": antigravity_changed,
+    }
+    return {
+        **codex,
+        "configured": True,
+        "changed": codex_changed or antigravity_changed,
+        "project_root": str(project_root),
+        "targets": {"codex": codex, "antigravity": antigravity},
         "maintenance_mode": "session-context-checkpoints",
     }
 
